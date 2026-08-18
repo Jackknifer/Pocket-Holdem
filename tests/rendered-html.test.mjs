@@ -279,7 +279,8 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(page, /联机对局/);
   assert.match(page, /即将开放/);
   assert.doesNotMatch(page, /对手强度/);
-  assert.match(page, /思考节奏/);
+  assert.match(page, /行动时限/);
+  assert.doesNotMatch(page, /思考节奏/);
   assert.match(page, /模型极致思考/);
   assert.match(page, /maxReasoning/);
   assert.match(page, /轮到你操作/);
@@ -322,7 +323,10 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(page, /JSON\.stringify\(\{ game, modelAudit, savedAt:/);
   assert.doesNotMatch(page, /JSON\.stringify\(\{[^}]*apiKey/);
   assert.match(page, /playerCount/);
-  assert.match(page, /aiPace/);
+  assert.match(page, /turnTime/);
+  assert.match(page, /actionTimeSeconds/);
+  assert.match(page, /actionDeadlineSeconds/);
+  assert.doesNotMatch(page, /title="联机对局正在开发中"/);
   assert.match(page, /if \(!game\) return <Lobby/);
   assert.match(page, /newSession\(settings\.playerCount\)/);
   assert.match(engine, /function showdown/);
@@ -360,6 +364,10 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(aiRoute, /所有文本字段必须使用简体中文/);
   assert.match(aiRoute, /competitiveProfile/);
   assert.match(aiRoute, /strengthApplication/);
+  assert.match(aiRoute, /actionDeadlineSeconds/);
+  assert.match(aiRoute, /actionTimeSeconds/);
+  assert.match(aiRoute, /request\.signal\.addEventListener\("abort"/);
+  assert.match(aiRoute, /Math\.min\(providerTimeoutMs, actionTimeSeconds \* 1_000\)/);
   assert.doesNotMatch(aiRoute, /console\.(?:log|error)/);
   assert.match(aiSkillsEntry, /\.\/opponent-skills/);
   for (const [index, name] of opponentSkillNames.entries()) {
@@ -389,10 +397,10 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(css, /\.hero-hand\s*\{[^}]*left:\s*calc\(50% - clamp/i);
   assert.doesNotMatch(css, /\.turn-announcer/);
   assert.match(css, /\.lobby-shell\s*\{[^}]*height:\s*100dvh;[^}]*overflow:\s*hidden;/i);
-  assert.match(css, /\.lobby-card\s*\{[^}]*width:\s*min\(820px,100%\);/i);
+  assert.match(css, /\.lobby-card\s*\{[^}]*width:\s*min\(760px,100%\);/i);
   assert.match(css, /\.lobby-controls-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2/i);
-  assert.match(css, /\.lobby-control-card\s*\{[^}]*min-height:\s*150px;/i);
-  assert.match(css, /\.lobby-control-card \.segment-control button\s*\{[^}]*height:\s*44px;[^}]*font-size:\s*13px;/i);
+  assert.match(css, /\.lobby-control-card\s*\{[^}]*min-height:\s*136px;/i);
+  assert.match(css, /\.lobby-control-card \.segment-control button\s*\{[^}]*height:\s*40px;[^}]*font-size:\s*12px;/i);
   assert.match(css, /@media \(max-width:\s*720px\)[\s\S]*?\.lobby-shell\s*\{[^}]*height:\s*100dvh;[^}]*overflow:\s*hidden;/i);
   assert.match(css, /\.lobby-model-popover\s*\{/);
   assert.doesNotMatch(css, /\.lobby-model-dialog|\.model-setup|\.model-opponents/);
@@ -406,7 +414,9 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(css, /\.result-card\.has-review\s*\{[^}]*min\(760px/i);
   assert.match(css, /\.sound-toggle\.is-on/);
   assert.match(css, /\.settings-section/);
-  assert.match(css, /\.lobby-reasoning-toggle/);
+  assert.match(css, /\.lobby-model-card/);
+  assert.match(css, /\.lobby-model-tools/);
+  assert.match(css, /\.lobby-model-reasoning-toggle\s*\{[^}]*justify-content:\s*space-between/i);
   assert.doesNotMatch(css, /\.decision-insight/);
   assert.match(css, /\.audit-light\.success/);
   assert.doesNotMatch(css, /#2f5a4a|green felt|casino/i);

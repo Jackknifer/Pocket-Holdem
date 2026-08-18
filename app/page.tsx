@@ -11,7 +11,7 @@ import { OPPONENT_SKILLS } from "./ai-skills";
 type Settings = {
   gameMode: GameMode;
   playerCount: PlayerCount;
-  aiPace: AiPace;
+  turnTime: TurnTime;
   modelAiEnabled: boolean;
   modelProvider: string;
   maxReasoning: boolean;
@@ -22,7 +22,7 @@ type Settings = {
 
 type PlayerCount = 2 | 3 | 4 | 5 | 6;
 type GameMode = "local" | "online";
-type AiPace = "calm" | "natural" | "quick";
+type TurnTime = 30 | 60 | 120;
 type ReviewMode = "training" | "standard";
 type ModelStatus = { tone: "idle" | "working" | "ready" | "fallback"; text: string };
 type ModelUsage = { input: number; output: number; total: number };
@@ -98,7 +98,7 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   { id: "glm", name: "GLM", model: "glm-5.2", configured: false, hint: "在 .env.local 设置 GLM_API_KEY" },
 ];
 const DEFAULT_SETTINGS: Settings = {
-  gameMode: "local", playerCount: 4, aiPace: "calm", modelAiEnabled: false,
+  gameMode: "local", playerCount: 4, turnTime: 30, modelAiEnabled: false,
   modelProvider: "openai", maxReasoning: true,
   sound: true, autoNext: false, reviewMode: "training",
 };
@@ -115,6 +115,7 @@ const MODEL_TEST_CONTEXT = {
   ],
   recentActions: ["你投入大盲注 20", "连接测试投入小盲注 10"],
   competitiveProfile: { level: "maximum", ...LOCAL_AI_PROFILE },
+  actionDeadlineSeconds: 120,
   legalActions: { fold: true, checkCall: true, allIn: true, raise: true, minRaiseTo: 40, maxRaiseTo: 2000 },
 };
 
@@ -122,7 +123,7 @@ function cardCode(card: Card): string {
   return `${rankLabel[card.rank]}${suitSymbol[card.suit]}`;
 }
 
-function buildModelContext(game: GameState, player: Player) {
+function buildModelContext(game: GameState, player: Player, actionTimeSeconds: TurnTime) {
   const due = Math.max(0, game.currentBet - player.bet);
   const bounds = legalRaiseBounds(game, player);
   const pot = getPot(game);
@@ -143,6 +144,7 @@ function buildModelContext(game: GameState, player: Player) {
     })),
     recentActions: game.log.slice(0, 10).map((entry) => entry.text).reverse(),
     competitiveProfile: { level: "maximum", ...LOCAL_AI_PROFILE },
+    actionDeadlineSeconds: actionTimeSeconds,
     legalActions: {
       fold: due > 0, checkCall: true, allIn: player.chips > 0,
       raise: bounds.max > game.currentBet, minRaiseTo: bounds.min, maxRaiseTo: bounds.max,
@@ -183,26 +185,26 @@ function safeModelError(error: unknown): string {
   return message ? message.slice(0, 110) : "模型服务不可用";
 }
 
-function aiDecisionDelay(game: GameState, player: Player, pace: AiPace): number {
-  const ranges: Record<AiPace, [number, number]> = {
-    calm: [5_500, 4_500],
-    natural: [3_500, 3_500],
-    quick: [1_800, 2_200],
+function aiDecisionDelay(game: GameState, player: Player, turnTime: TurnTime): number {
+  const ranges: Record<TurnTime, [number, number]> = {
+    30: [6_500, 5_000],
+    60: [8_500, 8_000],
+    120: [10_000, 12_000],
   };
-  const [base, spread] = ranges[pace];
+  const [base, spread] = ranges[turnTime];
   const due = Math.max(0, game.currentBet - player.bet);
   const pot = Math.max(1, getPot(game));
   const isComplex = game.phase !== "preflop" || due >= game.bigBlind * 3 || due / (pot + due) >= 0.24;
   const complexityTime = isComplex ? 900 + Math.random() * 1_400 : 0;
   const shortStackAdjustment = player.chips <= game.bigBlind * 10 ? -600 : 0;
-  return Math.max(1_400, Math.round(base + Math.random() * spread + complexityTime + shortStackAdjustment));
+  return Math.max(1_400, Math.min(turnTime * 1_000 - 1_500, Math.round(base + Math.random() * spread + complexityTime + shortStackAdjustment)));
 }
 
-async function requestModelDecision(provider: string, context: unknown, reasoning: "standard" | "max", signal: AbortSignal): Promise<ModelDecision> {
+async function requestModelDecision(provider: string, context: unknown, reasoning: "standard" | "max", signal: AbortSignal, actionTimeSeconds?: TurnTime): Promise<ModelDecision> {
   const response = await fetch("/api/ai-decision", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider, context, reasoning }),
+    body: JSON.stringify({ provider, context, reasoning, ...(actionTimeSeconds ? { actionTimeSeconds } : {}) }),
     signal,
   });
   const payload = await response.json().catch(() => ({})) as ModelDecision & { error?: string };
@@ -210,8 +212,8 @@ async function requestModelDecision(provider: string, context: unknown, reasonin
   return payload;
 }
 
-async function requestModelAction(game: GameState, player: Player, provider: string, reasoning: "standard" | "max", signal: AbortSignal): Promise<ModelActionResult> {
-  const payload = await requestModelDecision(provider, buildModelContext(game, player), reasoning, signal);
+async function requestModelAction(game: GameState, player: Player, provider: string, reasoning: "standard" | "max", signal: AbortSignal, actionTimeSeconds: TurnTime): Promise<ModelActionResult> {
+  const payload = await requestModelDecision(provider, buildModelContext(game, player, actionTimeSeconds), reasoning, signal, actionTimeSeconds);
   const action = normalizeModelAction(game, player, payload);
   if (!action) throw new Error("模型返回的动作无法执行");
   return {
@@ -297,7 +299,7 @@ export default function Home() {
   const [game, setGame] = useState<GameState | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [stats, setStats] = useState<Stats>(DEFAULT_STATS);
-  const [timer, setTimer] = useState(24);
+  const [timer, setTimer] = useState(DEFAULT_SETTINGS.turnTime);
   const [raiseTo, setRaiseTo] = useState(40);
   const [showRaise, setShowRaise] = useState(false);
   const [panel, setPanel] = useState<"settings" | "help" | "stats" | null>(null);
@@ -327,7 +329,7 @@ export default function Home() {
           nextSettings = {
             gameMode: "local",
             playerCount: [2, 3, 4, 5, 6].includes(Number(parsedSettings.playerCount)) ? parsedSettings.playerCount as PlayerCount : DEFAULT_SETTINGS.playerCount,
-            aiPace: ["calm", "natural", "quick"].includes(String(parsedSettings.aiPace)) ? parsedSettings.aiPace as AiPace : DEFAULT_SETTINGS.aiPace,
+            turnTime: [30, 60, 120].includes(Number(parsedSettings.turnTime)) ? parsedSettings.turnTime as TurnTime : DEFAULT_SETTINGS.turnTime,
             modelAiEnabled: Boolean(parsedSettings.modelAiEnabled),
             modelProvider: typeof parsedSettings.modelProvider === "string" ? parsedSettings.modelProvider : DEFAULT_SETTINGS.modelProvider,
             maxReasoning: parsedSettings.maxReasoning ?? DEFAULT_SETTINGS.maxReasoning,
@@ -407,7 +409,7 @@ export default function Home() {
     ? game && game.community.length >= 3 ? evaluateBest([...human.hole, ...game.community]).label : preflopLabel(human.hole)
     : "等待发牌";
 
-  const playTone = useCallback((kind: "deal" | "turn" | "action" | "raise" | "fold" | "win" | "lose", force = false) => {
+  const playTone = useCallback((kind: "deal" | "turn" | "clock" | "action" | "raise" | "fold" | "win" | "lose", force = false) => {
     if ((!settings.sound && !force) || typeof window === "undefined") return;
     try {
       const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -416,6 +418,7 @@ export default function Home() {
       const patterns: Record<typeof kind, Array<[number, number, number, number]>> = {
         deal: [[220, 0, .045, .016], [285, .065, .055, .018]],
         turn: [[420, 0, .08, .024], [560, .1, .12, .028]],
+        clock: [[520, 0, .045, .014]],
         action: [[275, 0, .07, .017]],
         raise: [[310, 0, .065, .02], [410, .075, .09, .023]],
         fold: [[235, 0, .06, .018], [185, .065, .08, .015]],
@@ -440,6 +443,10 @@ export default function Home() {
   useEffect(() => {
     if (isHumanTurn) playTone("turn");
   }, [isHumanTurn, playTone]);
+
+  useEffect(() => {
+    if (isHumanTurn && timer > 0 && timer <= 5) playTone("clock");
+  }, [isHumanTurn, playTone, timer]);
 
   useEffect(() => {
     if (!game || game.status !== "playing" || soundedHand.current === game.handNo) return;
@@ -467,10 +474,13 @@ export default function Home() {
     if (!game || game.status !== "playing" || game.currentPlayer < 0) return;
     const player = game.players[game.currentPlayer];
     if (player.isHuman) return;
-    const wait = aiDecisionDelay(game, player, settings.aiPace);
+    const wait = aiDecisionDelay(game, player, settings.turnTime);
     const controller = new AbortController();
     let cancelled = false;
-    const timeout = window.setTimeout(async () => {
+    let delayTimer: number | undefined;
+    const turnStartedAt = Date.now();
+    const deadline = window.setTimeout(() => controller.abort(), settings.turnTime * 1_000);
+    const runTurn = async () => {
       const selectedModel = modelOptions.find((item) => item.id === settings.modelProvider);
       const useModel = settings.modelAiEnabled && Boolean(selectedModel?.configured);
       let action: GameAction | null = null;
@@ -486,7 +496,7 @@ export default function Home() {
         setModelThinkingId(player.id);
         setModelStatus({ tone: "working", text: `${player.name} 正在请求 ${selectedModel?.model || providerName}` });
         try {
-          const result = await requestModelAction(game, player, settings.modelProvider, settings.maxReasoning ? "max" : "standard", controller.signal);
+          const result = await requestModelAction(game, player, settings.modelProvider, settings.maxReasoning ? "max" : "standard", controller.signal, settings.turnTime);
           action = result.action;
           updateModelAudit(auditId, {
             status: "success", provider: providerName, model: result.model,
@@ -506,7 +516,7 @@ export default function Home() {
           });
           if (!cancelled) setModelStatus({ tone: "ready", text: `${player.name} 已使用 ${providerName} 完成决策` });
         } catch (error) {
-          fallbackDetail = controller.signal.aborted ? "请求已取消" : safeModelError(error);
+          fallbackDetail = controller.signal.aborted ? `超过 ${settings.turnTime} 秒行动时限` : safeModelError(error);
           if (cancelled) updateModelAudit(auditId, { status: "fallback", detail: fallbackDetail });
           if (!cancelled) setModelStatus({ tone: "fallback", text: `${player.name}：${fallbackDetail}` });
         } finally {
@@ -521,6 +531,10 @@ export default function Home() {
           detail: fallbackDetail || "模型未返回可执行动作", completedAt: Date.now(),
         });
       }
+      const remainingWait = Math.max(0, wait - (Date.now() - turnStartedAt));
+      if (remainingWait > 0) await new Promise<void>((resolve) => { delayTimer = window.setTimeout(resolve, remainingWait); });
+      if (cancelled) return;
+      window.clearTimeout(deadline);
       playTone(action.type === "fold" ? "fold" : action.type === "raise" || action.type === "allIn" ? "raise" : "action");
       setGame((current) => {
         if (!current || current.status !== "playing" || current.handNo !== game.handNo) return current;
@@ -528,16 +542,17 @@ export default function Home() {
         if (!actor || actor.id !== player.id || actor.isHuman) return current;
         return applyAction(current, actor.id, action!);
       });
-    }, wait);
-    return () => { cancelled = true; controller.abort(); window.clearTimeout(timeout); };
-  }, [game, settings.aiPace, settings.maxReasoning, settings.modelAiEnabled, settings.modelProvider, modelOptions, addModelAudit, updateModelAudit, playTone]);
+    };
+    void runTurn();
+    return () => { cancelled = true; controller.abort(); window.clearTimeout(deadline); if (delayTimer) window.clearTimeout(delayTimer); };
+  }, [game, settings.maxReasoning, settings.modelAiEnabled, settings.modelProvider, settings.turnTime, modelOptions, addModelAudit, updateModelAudit, playTone]);
 
   useEffect(() => {
-    const reset = window.setTimeout(() => setTimer(24), 0);
-    if (!isHumanTurn) return () => window.clearTimeout(reset);
+    const reset = window.setTimeout(() => setTimer(settings.turnTime), 0);
+    if (!game || game.status !== "playing" || game.currentPlayer < 0) return () => window.clearTimeout(reset);
     const interval = window.setInterval(() => setTimer((value) => Math.max(0, value - 1)), 1000);
     return () => { window.clearTimeout(reset); window.clearInterval(interval); };
-  }, [game?.currentPlayer, game?.handNo, game?.phase, isHumanTurn]);
+  }, [game, settings.turnTime]);
 
   useEffect(() => {
     if (timer !== 0 || !game || !human || !isHumanTurn) return;
@@ -664,7 +679,7 @@ export default function Home() {
         <div className={`round-meta round-turn-status ${actingPlayer?.isHuman ? "is-you" : ""}`} role="status" aria-live="polite">
           <span className="round-turn-avatar">{actingPlayer?.avatar || "P"}</span>
           <span className="round-turn-copy">
-            <small>第 {game.handNo} 手 · {phaseLabel(game.phase)} · {game.players.length} 人桌</small>
+            <small>第 {game.handNo} 手 · {phaseLabel(game.phase)} · {game.players.length} 人桌{actingPlayer ? ` · 剩余 ${timer} 秒` : ""}</small>
             <strong>{actingPlayer ? actingPlayer.isHuman ? "轮到你操作" : modelThinkingId === actingPlayer.id ? `${actingPlayer.name} 正在调用模型` : `轮到 ${actingPlayer.name} 操作` : game.message}</strong>
           </span>
           <i className="round-turn-pulse" />
@@ -801,9 +816,9 @@ export default function Home() {
 
       <section className={`control-dock ${isHumanTurn ? "dock-your-turn" : "dock-waiting"}`} aria-label="行动控制">
         <div className="dock-context" aria-label="本手决策信息">
-          <span className="timer-ring" style={{ "--progress": `${timer / 24 * 360}deg` } as React.CSSProperties}><i>{isHumanTurn ? timer : "·"}</i></span>
+          <span className="timer-ring" style={{ "--progress": `${timer / settings.turnTime * 360}deg` } as React.CSSProperties}><i>{game.status === "playing" ? timer : "·"}</i></span>
           <div>
-            <small>{isHumanTurn ? `决策时间 · ${timer} 秒` : `第 ${game.handNo} 手 · ${phaseLabel(game.phase)}`}</small>
+            <small>{isHumanTurn ? `决策时间 · ${timer} 秒` : actingPlayer ? `${actingPlayer.name} 行动 · ${timer} 秒` : `第 ${game.handNo} 手 · ${phaseLabel(game.phase)}`}</small>
             <strong>{isHumanTurn ? `${handLabel} · ${due === 0 ? "可以过牌" : `待跟注 ${formatChips(Math.min(due, human.chips))}`}` : `${handLabel} · 筹码 ${formatChips(human.chips)}`}</strong>
           </div>
         </div>
@@ -839,10 +854,10 @@ export default function Home() {
                 <span className="modal-kicker">偏好</span><h2 id="modal-title">游戏设置</h2>
                 <div className="settings-section">
                   <div className="settings-section-title"><strong>对手决策</strong><small>本地 AI 始终使用最高强度</small></div>
-                  <div className="setting-group modal-pace"><span className="setting-label">思考节奏</span><div className="segment-control">
-                    {(["calm", "natural", "quick"] as AiPace[]).map((value) => <button key={value} className={settings.aiPace === value ? "active" : ""} onClick={() => updateSetting("aiPace", value)}>{{ calm: "比赛", natural: "自然", quick: "紧凑" }[value]}</button>)}
-                  </div><small>{settings.aiPace === "calm" ? "约 5.5–11 秒，复杂局面会多思考片刻。" : settings.aiPace === "quick" ? "约 1.8–5 秒，仍保留行动停顿。" : "约 3.5–8 秒，接近常见线上节奏。"}</small></div>
-                  <Toggle label="模型极致思考" detail="开启时请求模型支持的最高推理档；关闭时使用标准推理深度" checked={settings.maxReasoning} onChange={(value) => updateSetting("maxReasoning", value)} />
+                  <div className="setting-group modal-pace"><span className="setting-label">行动时限</span><div className="segment-control">
+                    {([30, 60, 120] as TurnTime[]).map((value) => <button key={value} className={settings.turnTime === value ? "active" : ""} onClick={() => updateSetting("turnTime", value)}>{value} 秒</button>)}
+                  </div><small>{settings.turnTime === 30 ? "参考 TDA 叫钟：25 秒行动，加最后 5 秒倒数。" : settings.turnTime === 60 ? "所有玩家统一 60 秒，适合较复杂牌局。" : "所有玩家统一 120 秒，适合模型极致思考。"}</small></div>
+                  <Toggle label="模型极致思考" detail="开启时使用最高推理档；关闭后仍保持充分思考，只降低等待与消耗" checked={settings.maxReasoning} onChange={(value) => updateSetting("maxReasoning", value)} />
                 </div>
                 <div className="settings-section">
                   <div className="settings-section-title"><strong>复盘</strong><small>只影响结算后的底牌展示</small></div>
@@ -906,7 +921,12 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const provider = modelOptions.find((item) => item.id === settings.modelProvider) || modelOptions[0] || DEFAULT_MODEL_OPTIONS[0];
   const availableModels = modelOptions.filter((item) => item.configured);
-  const paceLabel = { calm: "比赛", natural: "自然", quick: "紧凑" }[settings.aiPace];
+  const timeLabel = `${settings.turnTime} 秒行动`;
+  const modelCardStatus = testingModel
+    ? "检测中"
+    : settings.modelAiEnabled
+      ? modelStatus.tone === "fallback" ? "不可用" : "已连接"
+      : "本地";
   const modelDetail = settings.modelAiEnabled
     ? provider.configured ? `${provider.name} · ${provider.model}` : provider.hint
     : "当前使用本地策略，可从项目配置启用模型";
@@ -947,16 +967,14 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
             <div className="lobby-config">
               <div className="lobby-section-head">
                 <span><strong id="lobby-settings-title">对局设置</strong><small>只保留开局前需要选择的内容</small></span>
-                <button type="button" className={`lobby-reasoning-toggle ${settings.maxReasoning ? "is-on" : ""}`} role="switch" aria-checked={settings.maxReasoning} onClick={() => onSetting("maxReasoning", !settings.maxReasoning)}>
-                  <span><b>模型极致思考</b><small>{settings.maxReasoning ? "最高推理档" : "标准推理档"}</small></span><i />
-                </button>
+                <em>4 项</em>
               </div>
               <div className="lobby-controls-grid">
                 <div className="setting-group lobby-control-card">
                   <span className="setting-label">对局模式</span>
                   <div className="segment-control">
                     <button className="active" onClick={() => onSetting("gameMode", "local")}>本地对局</button>
-                    <button disabled aria-disabled="true" title="联机对局正在开发中">联机对局 <em>即将开放</em></button>
+                    <button disabled aria-disabled="true">联机对局 <em>即将开放</em></button>
                   </div>
                   <small>牌局与记录只保存在本机；联机模式暂不开放。</small>
                 </div>
@@ -968,19 +986,28 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                   <small>你与 {settings.playerCount - 1} 位风格不同的 AI 同桌。</small>
                 </div>
                 <div className="setting-group lobby-control-card">
-                  <span className="setting-label">思考节奏</span>
+                  <span className="setting-label">行动时限</span>
                   <div className="segment-control">
-                    {(["calm", "natural", "quick"] as AiPace[]).map((value) => <button key={value} className={settings.aiPace === value ? "active" : ""} onClick={() => onSetting("aiPace", value)}>{{ calm: "比赛", natural: "自然", quick: "紧凑" }[value]}</button>)}
+                    {([30, 60, 120] as TurnTime[]).map((value) => <button key={value} className={settings.turnTime === value ? "active" : ""} onClick={() => onSetting("turnTime", value)}>{value} 秒</button>)}
                   </div>
-                  <small>{settings.aiPace === "calm" ? "约 5.5–11 秒，更接近比赛。" : settings.aiPace === "quick" ? "约 1.8–5 秒，节奏更紧凑。" : "约 3.5–8 秒，自然线上节奏。"}</small>
+                  <small>{settings.turnTime === 30 ? "参考 TDA 叫钟：25 秒行动并在最后 5 秒倒数。" : settings.turnTime === 60 ? "每位玩家统一 60 秒，模型也必须按时返回。" : "每位玩家统一 120 秒，为极致思考保留时间。"}</small>
                 </div>
                 <div className={`lobby-model-picker ${modelPanelOpen ? "is-open" : ""}`} ref={modelPickerRef}>
-                  <button type="button" className="lobby-model-entry" aria-haspopup="listbox" aria-expanded={modelPanelOpen} onClick={() => setModelPanelOpen((value) => !value)}>
-                    <span className="lobby-model-symbol">AI</span>
-                    <span className="lobby-model-copy"><strong>模型对手</strong><small>{modelDetail}</small></span>
-                    <em className={`model-status ${modelStatus.tone}`}>{testingModel ? "连接中" : settings.modelAiEnabled ? modelStatus.text : "本地 AI"}</em>
-                    <span className="lobby-model-open">选择 <b>{modelPanelOpen ? "↑" : "↓"}</b></span>
-                  </button>
+                  <div className="lobby-model-card">
+                    <button type="button" className="lobby-model-entry" aria-haspopup="listbox" aria-expanded={modelPanelOpen} onClick={() => setModelPanelOpen((value) => !value)}>
+                      <span className="lobby-model-symbol">AI</span>
+                      <span className="lobby-model-copy"><strong>模型对手</strong><small>{modelDetail}</small></span>
+                      <span className="lobby-model-actions">
+                        <em className={`model-status ${modelStatus.tone}`}>{modelCardStatus}</em>
+                        <span className="lobby-model-open">更换 <b>{modelPanelOpen ? "↑" : "↓"}</b></span>
+                      </span>
+                    </button>
+                    <div className="lobby-model-tools">
+                      <button type="button" className={`lobby-model-reasoning-toggle ${settings.maxReasoning ? "is-on" : ""}`} role="switch" aria-checked={settings.maxReasoning} aria-label={`深度思考，当前为${settings.maxReasoning ? "极致" : "充分"}`} onClick={() => onSetting("maxReasoning", !settings.maxReasoning)}>
+                        <b>深度思考</b><i />
+                      </button>
+                    </div>
+                  </div>
                   {modelPanelOpen && (
                     <div className="lobby-model-popover" role="listbox" aria-label="选择可用模型">
                       <div className="lobby-model-popover-head"><strong>本场决策模型</strong><small>选择后自动检测连接</small></div>
@@ -1010,7 +1037,7 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                 </div>
               )}
               <div className="lobby-selection-line" aria-label="当前选择">
-                <span>当前选择</span><b>本地对局</b><i /><b>{settings.playerCount} 人</b><i /><b>{paceLabel}</b><i /><b>{settings.modelAiEnabled ? provider.name : "本地 AI · 最高强度"}</b>
+                <span>当前选择</span><b>本地对局</b><i /><b>{settings.playerCount} 人</b><i /><b>{timeLabel}</b><i /><b>{settings.modelAiEnabled ? provider.name : "本地 AI · 最高强度"}</b>
               </div>
               <div className="lobby-history" aria-label="本机历史记录">
                 <span>本机记录</span><b>{stats.hands} 手牌</b><i /><b>{winRate}% 胜率</b><i /><b>最大 {formatChips(stats.biggestPot)}</b>

@@ -4,6 +4,7 @@ type DecisionRequest = {
   provider?: string;
   context?: unknown;
   reasoning?: "standard" | "max";
+  actionTimeSeconds?: number;
 };
 
 type MessageContent = string | Array<{ type?: string; text?: string; thinking?: string }> | null;
@@ -86,12 +87,18 @@ function readReasoningCharacters(response: ModelResponse | null): number | null 
   return length > 0 ? length : null;
 }
 
+function supportsOpenAiXHigh(model: string): boolean {
+  return /codex-max|gpt-5\.(?:[2-9]|[1-9]\d)/i.test(model);
+}
+
 function reasoningMode(config: ServerModelConfig, compatibilityRetry: boolean, requested: "standard" | "max"): string {
   if (config.adapter === "deepseek") return requested === "max" ? "max" : "high";
   if (config.adapter === "glm" && /glm-5\.2/i.test(config.model)) return compatibilityRetry ? "provider-default" : requested === "max" ? "max" : "high";
+  if (config.adapter === "kimi" && /kimi-k3/i.test(config.model)) return compatibilityRetry ? "provider-default" : requested === "max" ? "max" : "high";
+  if (config.adapter === "kimi" && /kimi-k2\.7-code/i.test(config.model)) return "native";
   if (config.adapter === "glm" || config.adapter === "kimi") return compatibilityRetry ? "provider-default" : "enabled";
   if (config.adapter === "minimax") return /minimax-m3/i.test(config.model) ? compatibilityRetry ? "provider-default" : "adaptive" : "native";
-  if (config.adapter === "openai" && /^(?:gpt-5|o[134])/i.test(config.model)) return compatibilityRetry ? "provider-default" : requested === "max" ? "xhigh" : "high";
+  if (config.adapter === "openai" && /^(?:gpt-5|o[134])/i.test(config.model)) return compatibilityRetry ? "provider-default" : requested === "max" && supportsOpenAiXHigh(config.model) ? "xhigh" : "high";
   return "model-default";
 }
 
@@ -112,10 +119,11 @@ function modelPayload(config: ServerModelConfig, contextText: string, compatibil
     "以 objective 为长期目标，选择与当前局面相关的规则。skillApplication 必须明确指出本次实际采用的角色规则及其对动作的影响，不得只复述角色名称。",
     "本游戏没有低难度档。输入中的 competitiveProfile 表示固定最高竞技强度；不得故意犯错，完整考虑范围、组合、阻断牌、位置、SPR、底池赔率和行动线路，以长期期望值最大化。",
     requestedReasoning === "max" ? "本次启用极致思考：在内部尽可能充分验证候选动作、反例和尺度后再回答。" : "本次使用标准思考：保持严谨，但优先在合理延迟内完成决策。",
+    "输入中的 actionDeadlineSeconds 是本次行动的硬性总时限。你必须自行分配思考与作答时间，并在该秒数内返回完整、合法的 JSON；超时会被自动判定为模型决策失败。",
     "必须从 legalActions 中选择合法动作。raise 时 amount 必须位于 minRaiseTo 与 maxRaiseTo 之间。",
-    "在内部充分推理后再作答，但不要在最终 JSON 中输出隐藏思维链或逐步内心推演。最终输出应提供完整、可核验的专业分析，不要为了简短而省略关键依据。",
+    "在内部充分推理后再作答，但不要在最终 JSON 中输出隐藏思维链或逐步内心推演。最终答案可以简洁；用关键结论证明决策即可，不以最终文字长度代替推理质量。",
     "除 action 的英文枚举值外，所有文本字段必须使用简体中文。",
-    "只返回一个 JSON 对象，不要 Markdown 或额外文字。严格使用：{\"action\":\"fold|checkCall|raise|allIn\",\"amount\":数字或null,\"note\":\"完整动作摘要\",\"assessment\":\"详细说明绝对牌力、相对牌力和牌面\",\"rangeAnalysis\":\"双方范围、位置与组合分析\",\"potAnalysis\":\"底池赔率、有效筹码、SPR与尺度分析\",\"factors\":[\"至少四项公开因素\"],\"alternatives\":[{\"action\":\"其他合法候选动作\",\"reason\":\"为何不选\"}],\"skillApplication\":\"采用的角色规则及具体影响\",\"strengthApplication\":\"最高竞技强度如何落实到本次决策\",\"risk\":\"主要反例、风险和不确定性\",\"confidence\":0到100的整数}。",
+    "只返回一个 JSON 对象，不要 Markdown 或额外文字。严格使用：{\"action\":\"fold|checkCall|raise|allIn\",\"amount\":数字或null,\"note\":\"动作摘要\",\"assessment\":\"牌力结论\",\"rangeAnalysis\":\"范围与位置结论\",\"potAnalysis\":\"赔率、SPR与尺度结论\",\"factors\":[\"2至4项关键公开因素\"],\"alternatives\":[{\"action\":\"主要候选动作\",\"reason\":\"未选择原因\"}],\"skillApplication\":\"采用的角色规则\",\"strengthApplication\":\"最高竞技强度的具体体现\",\"risk\":\"主要风险与不确定性\",\"confidence\":0到100的整数}。各分析字段优先使用一到两句完整短句。",
   ].join("\n");
 
   if (config.adapter === "minimax") {
@@ -136,9 +144,12 @@ function modelPayload(config: ServerModelConfig, contextText: string, compatibil
   };
 
   const openAiReasoning = /^(?:gpt-5|o[134])/i.test(config.model);
+  const openAiEffort = requestedReasoning === "max" && supportsOpenAiXHigh(config.model) ? "xhigh" : "high";
+  const kimiK3 = /kimi-k3/i.test(config.model);
+  const kimiAlwaysThinking = /kimi-k2\.7-code/i.test(config.model);
   const adapters: Record<ModelAdapter, Record<string, unknown>> = {
     openai: openAiReasoning
-      ? { max_completion_tokens: requestedReasoning === "max" ? 32768 : 16384, ...(!compatibilityRetry ? { reasoning_effort: requestedReasoning === "max" ? "xhigh" : "high", response_format: { type: "json_object" } } : {}) }
+      ? { max_completion_tokens: requestedReasoning === "max" ? 32768 : 16384, ...(!compatibilityRetry ? { reasoning_effort: openAiEffort, response_format: { type: "json_object" } } : {}) }
       : { max_tokens: 8192, ...(!compatibilityRetry ? { response_format: { type: "json_object" } } : {}) },
     deepseek: {
       max_tokens: requestedReasoning === "max" ? 32768 : 16384,
@@ -149,7 +160,10 @@ function modelPayload(config: ServerModelConfig, contextText: string, compatibil
     minimax: {},
     kimi: {
       max_completion_tokens: requestedReasoning === "max" ? 32768 : 16384,
-      ...(!compatibilityRetry ? { thinking: { type: "enabled" }, response_format: { type: "json_object" } } : {}),
+      ...(!compatibilityRetry ? {
+        ...(kimiK3 ? { reasoning_effort: requestedReasoning === "max" ? "max" : "high" } : kimiAlwaysThinking ? {} : { thinking: { type: "enabled" } }),
+        response_format: { type: "json_object" },
+      } : {}),
     },
     glm: {
       max_tokens: requestedReasoning === "max" ? 32768 : 16384,
@@ -198,6 +212,7 @@ export async function handleAiDecisionRequest(request: Request) {
 
   const provider = body.provider?.trim().toLowerCase().slice(0, 64) || "";
   const requestedReasoning = body.reasoning === "standard" ? "standard" : "max";
+  const actionTimeSeconds = [30, 60, 120].includes(Number(body.actionTimeSeconds)) ? Number(body.actionTimeSeconds) : null;
   if (!provider) return jsonError("请选择模型", 400);
   const config = getModelConfig(provider);
   if (!config) return jsonError("此模型尚未在 .env.local 配置 API Key，请保存文件并重启服务", 400);
@@ -208,8 +223,12 @@ export async function handleAiDecisionRequest(request: Request) {
   if (contextText.length > 18_000) return jsonError("牌局上下文过大", 413);
 
   const controller = new AbortController();
-  const timeoutMs = config.adapter === "minimax" ? 240_000 : config.adapter === "generic" ? 90_000 : 180_000;
+  const providerTimeoutMs = config.adapter === "minimax" ? 240_000 : config.adapter === "generic" ? 90_000 : 180_000;
+  const timeoutMs = actionTimeSeconds ? Math.min(providerTimeoutMs, actionTimeSeconds * 1_000) : providerTimeoutMs;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const abortForDisconnectedClient = () => controller.abort();
+  if (request.signal.aborted) controller.abort();
+  else request.signal.addEventListener("abort", abortForDisconnectedClient, { once: true });
   try {
     const supportsCompatibilityRetry = config.adapter !== "generic";
     const attempts = supportsCompatibilityRetry ? 2 : 1;
@@ -331,6 +350,7 @@ export async function handleAiDecisionRequest(request: Request) {
     return jsonError(error instanceof Error && error.name === "AbortError" ? `模型响应超过 ${timeoutMs / 1000} 秒` : "无法连接模型服务，请检查本地 API 地址或网络", 504);
   } finally {
     clearTimeout(timeout);
+    request.signal.removeEventListener("abort", abortForDisconnectedClient);
   }
 }
 
