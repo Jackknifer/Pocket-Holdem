@@ -324,6 +324,9 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.doesNotMatch(page, /JSON\.stringify\(\{[^}]*apiKey/);
   assert.match(page, /playerCount/);
   assert.match(page, /turnTime/);
+  assert.match(page, /type TurnTime = 30 \| 120 \| 300/);
+  assert.match(page, /\[30, 120, 300\]/);
+  assert.doesNotMatch(page, /\[30, 60, 120\]/);
   assert.match(page, /actionTimeSeconds/);
   assert.match(page, /actionDeadlineSeconds/);
   assert.doesNotMatch(page, /title="联机对局正在开发中"/);
@@ -366,6 +369,8 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(aiRoute, /strengthApplication/);
   assert.match(aiRoute, /actionDeadlineSeconds/);
   assert.match(aiRoute, /actionTimeSeconds/);
+  assert.match(aiRoute, /\[30, 120, 300\]/);
+  assert.match(aiRoute, /actionTimeSeconds\s*\?\s*360_000/);
   assert.match(aiRoute, /request\.signal\.addEventListener\("abort"/);
   assert.match(aiRoute, /Math\.min\(providerTimeoutMs, actionTimeSeconds \* 1_000\)/);
   assert.doesNotMatch(aiRoute, /console\.(?:log|error)/);

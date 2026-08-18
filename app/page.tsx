@@ -22,7 +22,7 @@ type Settings = {
 
 type PlayerCount = 2 | 3 | 4 | 5 | 6;
 type GameMode = "local" | "online";
-type TurnTime = 30 | 60 | 120;
+type TurnTime = 30 | 120 | 300;
 type ReviewMode = "training" | "standard";
 type ModelStatus = { tone: "idle" | "working" | "ready" | "fallback"; text: string };
 type ModelUsage = { input: number; output: number; total: number };
@@ -188,8 +188,8 @@ function safeModelError(error: unknown): string {
 function aiDecisionDelay(game: GameState, player: Player, turnTime: TurnTime): number {
   const ranges: Record<TurnTime, [number, number]> = {
     30: [6_500, 5_000],
-    60: [8_500, 8_000],
     120: [10_000, 12_000],
+    300: [12_000, 14_000],
   };
   const [base, spread] = ranges[turnTime];
   const due = Math.max(0, game.currentBet - player.bet);
@@ -329,7 +329,7 @@ export default function Home() {
           nextSettings = {
             gameMode: "local",
             playerCount: [2, 3, 4, 5, 6].includes(Number(parsedSettings.playerCount)) ? parsedSettings.playerCount as PlayerCount : DEFAULT_SETTINGS.playerCount,
-            turnTime: [30, 60, 120].includes(Number(parsedSettings.turnTime)) ? parsedSettings.turnTime as TurnTime : DEFAULT_SETTINGS.turnTime,
+            turnTime: [30, 120, 300].includes(Number(parsedSettings.turnTime)) ? parsedSettings.turnTime as TurnTime : DEFAULT_SETTINGS.turnTime,
             modelAiEnabled: Boolean(parsedSettings.modelAiEnabled),
             modelProvider: typeof parsedSettings.modelProvider === "string" ? parsedSettings.modelProvider : DEFAULT_SETTINGS.modelProvider,
             maxReasoning: parsedSettings.maxReasoning ?? DEFAULT_SETTINGS.maxReasoning,
@@ -855,8 +855,8 @@ export default function Home() {
                 <div className="settings-section">
                   <div className="settings-section-title"><strong>对手决策</strong><small>本地 AI 始终使用最高强度</small></div>
                   <div className="setting-group modal-pace"><span className="setting-label">行动时限</span><div className="segment-control">
-                    {([30, 60, 120] as TurnTime[]).map((value) => <button key={value} className={settings.turnTime === value ? "active" : ""} onClick={() => updateSetting("turnTime", value)}>{value} 秒</button>)}
-                  </div><small>{settings.turnTime === 30 ? "参考 TDA 叫钟：25 秒行动，加最后 5 秒倒数。" : settings.turnTime === 60 ? "所有玩家统一 60 秒，适合较复杂牌局。" : "所有玩家统一 120 秒，适合模型极致思考。"}</small></div>
+                    {([30, 120, 300] as TurnTime[]).map((value) => <button key={value} className={settings.turnTime === value ? "active" : ""} onClick={() => updateSetting("turnTime", value)}>{value} 秒</button>)}
+                  </div><small>{settings.turnTime === 30 ? "参考 TDA 叫钟：25 秒行动，加最后 5 秒倒数。" : settings.turnTime === 120 ? "所有玩家统一 120 秒，适合大多数深度思考。" : "所有玩家统一 300 秒，为长时间极致思考保留空间。"}</small></div>
                   <Toggle label="模型极致思考" detail="开启时使用最高推理档；关闭后仍保持充分思考，只降低等待与消耗" checked={settings.maxReasoning} onChange={(value) => updateSetting("maxReasoning", value)} />
                 </div>
                 <div className="settings-section">
@@ -988,9 +988,9 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                 <div className="setting-group lobby-control-card">
                   <span className="setting-label">行动时限</span>
                   <div className="segment-control">
-                    {([30, 60, 120] as TurnTime[]).map((value) => <button key={value} className={settings.turnTime === value ? "active" : ""} onClick={() => onSetting("turnTime", value)}>{value} 秒</button>)}
+                    {([30, 120, 300] as TurnTime[]).map((value) => <button key={value} className={settings.turnTime === value ? "active" : ""} onClick={() => onSetting("turnTime", value)}>{value} 秒</button>)}
                   </div>
-                  <small>{settings.turnTime === 30 ? "参考 TDA 叫钟：25 秒行动并在最后 5 秒倒数。" : settings.turnTime === 60 ? "每位玩家统一 60 秒，模型也必须按时返回。" : "每位玩家统一 120 秒，为极致思考保留时间。"}</small>
+                  <small>{settings.turnTime === 30 ? "参考 TDA 叫钟：25 秒行动并在最后 5 秒倒数。" : settings.turnTime === 120 ? "每位玩家统一 120 秒，适合大多数深度思考。" : "每位玩家统一 300 秒，为长时间极致思考保留空间。"}</small>
                 </div>
                 <div className={`lobby-model-picker ${modelPanelOpen ? "is-open" : ""}`} ref={modelPickerRef}>
                   <div className="lobby-model-card">

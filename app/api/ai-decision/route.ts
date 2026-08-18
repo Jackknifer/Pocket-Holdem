@@ -212,7 +212,7 @@ export async function handleAiDecisionRequest(request: Request) {
 
   const provider = body.provider?.trim().toLowerCase().slice(0, 64) || "";
   const requestedReasoning = body.reasoning === "standard" ? "standard" : "max";
-  const actionTimeSeconds = [30, 60, 120].includes(Number(body.actionTimeSeconds)) ? Number(body.actionTimeSeconds) : null;
+  const actionTimeSeconds = [30, 120, 300].includes(Number(body.actionTimeSeconds)) ? Number(body.actionTimeSeconds) : null;
   if (!provider) return jsonError("请选择模型", 400);
   const config = getModelConfig(provider);
   if (!config) return jsonError("此模型尚未在 .env.local 配置 API Key，请保存文件并重启服务", 400);
@@ -223,7 +223,9 @@ export async function handleAiDecisionRequest(request: Request) {
   if (contextText.length > 18_000) return jsonError("牌局上下文过大", 413);
 
   const controller = new AbortController();
-  const providerTimeoutMs = config.adapter === "minimax" ? 240_000 : config.adapter === "generic" ? 90_000 : 180_000;
+  const providerTimeoutMs = actionTimeSeconds
+    ? 360_000
+    : config.adapter === "minimax" ? 240_000 : config.adapter === "generic" ? 90_000 : 180_000;
   const timeoutMs = actionTimeSeconds ? Math.min(providerTimeoutMs, actionTimeSeconds * 1_000) : providerTimeoutMs;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const abortForDisconnectedClient = () => controller.abort();
