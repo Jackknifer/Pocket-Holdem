@@ -112,6 +112,17 @@ test("all five official providers use their documented request shape", async () 
       assert.equal(result.attempts, 1, provider);
       assert.equal(result.recovered, false, provider);
     }
+    const standardResponse = await worker.fetch(
+      new Request("http://localhost/api/ai-decision", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "deepseek", reasoning: "standard", context: { legalActions: { checkCall: true } } }),
+      }),
+      { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
+      { waitUntil() {}, passThroughOnException() {} },
+    );
+    assert.equal(standardResponse.status, 200);
+    assert.equal((await standardResponse.json()).reasoningMode, "high");
   } finally {
     globalThis.fetch = originalFetch;
     for (const [, envName] of providers) delete process.env[envName];
@@ -119,15 +130,18 @@ test("all five official providers use their documented request shape", async () 
 
   const byProvider = Object.fromEntries(providers.map(([provider], index) => [provider, calls[index].body]));
   assert.deepEqual(byProvider.openai.response_format, { type: "json_object" });
-  assert.deepEqual(byProvider.deepseek.thinking, { type: "disabled" });
+  assert.deepEqual(byProvider.deepseek.thinking, { type: "enabled" });
+  assert.equal(byProvider.deepseek.reasoning_effort, "max");
   assert.deepEqual(byProvider.deepseek.response_format, { type: "json_object" });
-  assert.equal(byProvider.minimax.max_tokens, 4096);
+  assert.equal(byProvider.minimax.max_tokens, 32768);
   assert.equal(typeof byProvider.minimax.system, "string");
   assert.equal(byProvider.minimax.messages.length, 1);
-  assert.deepEqual(byProvider.kimi.thinking, { type: "disabled" });
+  assert.deepEqual(byProvider.kimi.thinking, { type: "enabled" });
   assert.deepEqual(byProvider.kimi.response_format, { type: "json_object" });
-  assert.deepEqual(byProvider.glm.thinking, { type: "disabled" });
+  assert.deepEqual(byProvider.glm.thinking, { type: "enabled" });
+  assert.equal(byProvider.glm.reasoning_effort, "max");
   assert.deepEqual(byProvider.glm.response_format, { type: "json_object" });
+  assert.equal(calls[5].body.reasoning_effort, "high");
   for (const call of calls.filter((call) => !call.body.system)) {
     assert.equal(call.body.stream, false);
     assert.match(JSON.stringify(call.headers), /Bearer test-local-key-123456/);
@@ -150,7 +164,8 @@ test("DeepSeek and MiniMax retry their documented structured-output edge cases",
     const body = JSON.parse(String(init?.body || "{}"));
     calls.push(body);
     const isDeepSeek = body.model === "deepseek-v4-flash";
-    const firstAttempt = isDeepSeek ? "response_format" in body : body.max_tokens === 4096;
+    const providerAttempt = calls.filter((call) => call.model === body.model).length;
+    const firstAttempt = isDeepSeek ? "response_format" in body : providerAttempt === 1;
     const result = isDeepSeek
       ? firstAttempt ? {
           model: body.model,
@@ -191,7 +206,7 @@ test("DeepSeek and MiniMax retry their documented structured-output edge cases",
   }
   assert.equal(calls.length, 4);
   assert.equal(calls[1].response_format, undefined);
-  assert.equal(calls[3].max_tokens, 8192);
+  assert.equal(calls[3].max_tokens, 32768);
 });
 
 test("MiniMax falls back between its official global and mainland China regions", async () => {
@@ -259,7 +274,14 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(page, /pocket-active-session/);
   assert.doesNotMatch(page, /行动提示|模拟胜率|底池赔率/);
   assert.match(page, /对局人数/);
+  assert.match(page, /对局模式/);
+  assert.match(page, /本地对局/);
+  assert.match(page, /联机对局/);
+  assert.match(page, /即将开放/);
+  assert.doesNotMatch(page, /对手强度/);
   assert.match(page, /思考节奏/);
+  assert.match(page, /模型极致思考/);
+  assert.match(page, /maxReasoning/);
   assert.match(page, /轮到你操作/);
   assert.match(page, /seat-turn-label/);
   assert.match(page, /DeepSeek/);
@@ -302,11 +324,13 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(page, /playerCount/);
   assert.match(page, /aiPace/);
   assert.match(page, /if \(!game\) return <Lobby/);
-  assert.doesNotMatch(page, /setGame\(newSession\(nextSettings\.difficulty\)\)/);
+  assert.match(page, /newSession\(settings\.playerCount\)/);
   assert.match(engine, /function showdown/);
   assert.match(engine, /legalRaiseBounds/);
   assert.match(engine, /estimateEquity/);
   assert.match(engine, /inferredRangeFloor/);
+  assert.match(engine, /LOCAL_AI_PROFILE/);
+  assert.doesNotMatch(engine, /AI_DIFFICULTY_PROFILES|decisionLapse|difficulty:/);
   assert.match(engine, /BLIND_LEVELS/);
   assert.match(engine, /basePlayers\(playerCount/);
   assert.match(engine, /continueThreshold/);
@@ -315,9 +339,10 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(engine, /退回未被跟注/);
   assert.match(engine, /正式牌局每条公共牌街先烧一张牌/);
   assert.match(aiRoute, /messages:/);
-  assert.match(aiRoute, /thinking:\s*\{ type:\s*"disabled" \}/);
+  assert.match(aiRoute, /thinking:\s*\{ type:\s*"enabled" \}/);
+  assert.match(aiRoute, /reasoning_effort:\s*requestedReasoning === "max" \? "max" : "high"/);
   assert.match(aiRoute, /response_format:\s*\{ type:\s*"json_object" \}/);
-  assert.match(aiRoute, /max_tokens:\s*compatibilityRetry \? 8192 : 4096/);
+  assert.match(aiRoute, /max_tokens:\s*requestedReasoning === "max" \? 32768 : 16384/);
   assert.match(aiRoute, /X-Api-Key/);
   assert.match(aiRoute, /anthropic-version/);
   assert.match(aiRoute, /cleanModelOutput/);
@@ -331,7 +356,10 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(aiRoute, /skillApplication/);
   assert.match(aiRoute, /assessment/);
   assert.match(aiRoute, /confidence/);
-  assert.match(aiRoute, /不要输出隐含思维链/);
+  assert.match(aiRoute, /不要在最终 JSON 中输出隐藏思维链/);
+  assert.match(aiRoute, /所有文本字段必须使用简体中文/);
+  assert.match(aiRoute, /competitiveProfile/);
+  assert.match(aiRoute, /strengthApplication/);
   assert.doesNotMatch(aiRoute, /console\.(?:log|error)/);
   assert.match(aiSkillsEntry, /\.\/opponent-skills/);
   for (const [index, name] of opponentSkillNames.entries()) {
@@ -373,9 +401,12 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(css, /\.audit-proof/);
   assert.match(css, /\.audit-output/);
   assert.match(css, /\.hand-review-grid/);
+  assert.match(css, /\.review-card-code/);
+  assert.match(css, /font-variant-numeric:\s*lining-nums tabular-nums/);
   assert.match(css, /\.result-card\.has-review\s*\{[^}]*min\(760px/i);
   assert.match(css, /\.sound-toggle\.is-on/);
   assert.match(css, /\.settings-section/);
+  assert.match(css, /\.lobby-reasoning-toggle/);
   assert.doesNotMatch(css, /\.decision-insight/);
   assert.match(css, /\.audit-light\.success/);
   assert.doesNotMatch(css, /#2f5a4a|green felt|casino/i);

@@ -3,13 +3,14 @@ import { getModelConfig, type ModelAdapter, type ServerModelConfig } from "../..
 type DecisionRequest = {
   provider?: string;
   context?: unknown;
+  reasoning?: "standard" | "max";
 };
 
-type MessageContent = string | Array<{ type?: string; text?: string }> | null;
+type MessageContent = string | Array<{ type?: string; text?: string; thinking?: string }> | null;
 type ModelResponse = {
   id?: string;
   model?: string;
-  choices?: Array<{ finish_reason?: string; message?: { content?: MessageContent } }>;
+  choices?: Array<{ finish_reason?: string; message?: { content?: MessageContent; reasoning_content?: string } }>;
   content?: MessageContent;
   stop_reason?: string;
   error?: { message?: string; code?: string | number };
@@ -28,8 +29,13 @@ type Decision = {
   amount?: unknown;
   note?: unknown;
   assessment?: unknown;
+  rangeAnalysis?: unknown;
+  potAnalysis?: unknown;
   factors?: unknown;
+  alternatives?: unknown;
   skillApplication?: unknown;
+  strengthApplication?: unknown;
+  risk?: unknown;
   confidence?: unknown;
 };
 
@@ -68,7 +74,25 @@ function parseDecision(text: string): Decision | null {
 }
 
 function cleanModelOutput(text: string): string {
-  return text.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "").trim().slice(0, 1200);
+  return text.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "").trim();
+}
+
+function readReasoningCharacters(response: ModelResponse | null): number | null {
+  const choiceReasoning = response?.choices?.[0]?.message?.reasoning_content;
+  const blockReasoning = Array.isArray(response?.content)
+    ? response.content.filter((part) => typeof part.thinking === "string").map((part) => part.thinking).join("")
+    : "";
+  const length = (choiceReasoning || "").length + blockReasoning.length;
+  return length > 0 ? length : null;
+}
+
+function reasoningMode(config: ServerModelConfig, compatibilityRetry: boolean, requested: "standard" | "max"): string {
+  if (config.adapter === "deepseek") return requested === "max" ? "max" : "high";
+  if (config.adapter === "glm" && /glm-5\.2/i.test(config.model)) return compatibilityRetry ? "provider-default" : requested === "max" ? "max" : "high";
+  if (config.adapter === "glm" || config.adapter === "kimi") return compatibilityRetry ? "provider-default" : "enabled";
+  if (config.adapter === "minimax") return /minimax-m3/i.test(config.model) ? compatibilityRetry ? "provider-default" : "adaptive" : "native";
+  if (config.adapter === "openai" && /^(?:gpt-5|o[134])/i.test(config.model)) return compatibilityRetry ? "provider-default" : requested === "max" ? "xhigh" : "high";
+  return "model-default";
 }
 
 function readUsage(response: ModelResponse | null): { input: number; output: number; total: number } | null {
@@ -80,15 +104,18 @@ function readUsage(response: ModelResponse | null): { input: number; output: num
   return input || output || total ? { input, output, total } : null;
 }
 
-function modelPayload(config: ServerModelConfig, contextText: string, compatibilityRetry = false): Record<string, unknown> {
+function modelPayload(config: ServerModelConfig, contextText: string, compatibilityRetry = false, requestedReasoning: "standard" | "max" = "max"): Record<string, unknown> {
   const system = [
     "你是一名德州扑克对手，只能根据提供的公开牌局信息和自己的底牌决策。",
     "不得假设其他玩家的隐藏底牌。结合位置、筹码、底池赔率、牌力、对手行动和角色性格。",
     "输入中 role.skill 是该对手必须遵守的完整专属技能。决策前检查其中 identity、preflop 或当前 postflop 街、sizing、adaptations、stackAndTable、decisionProtocol、outputRequirements 与 guardrails；不得只读取 title 或 summary。",
     "以 objective 为长期目标，选择与当前局面相关的规则。skillApplication 必须明确指出本次实际采用的角色规则及其对动作的影响，不得只复述角色名称。",
+    "本游戏没有低难度档。输入中的 competitiveProfile 表示固定最高竞技强度；不得故意犯错，完整考虑范围、组合、阻断牌、位置、SPR、底池赔率和行动线路，以长期期望值最大化。",
+    requestedReasoning === "max" ? "本次启用极致思考：在内部尽可能充分验证候选动作、反例和尺度后再回答。" : "本次使用标准思考：保持严谨，但优先在合理延迟内完成决策。",
     "必须从 legalActions 中选择合法动作。raise 时 amount 必须位于 minRaiseTo 与 maxRaiseTo 之间。",
-    "不要输出隐含思维链、逐步内心推演或未提供的数据；只给出可核验的简要决策依据。",
-    "只返回一个 JSON 对象，不要 Markdown 或额外文字。严格使用：{\"action\":\"fold|checkCall|raise|allIn\",\"amount\":数字或null,\"note\":\"一句完整的动作摘要\",\"assessment\":\"牌力与双方范围的简要判断\",\"factors\":[\"公开因素1\",\"公开因素2\"],\"skillApplication\":\"采用的角色规则及影响\",\"confidence\":0到100的整数}。总长度建议 120–260 个中文字符。",
+    "在内部充分推理后再作答，但不要在最终 JSON 中输出隐藏思维链或逐步内心推演。最终输出应提供完整、可核验的专业分析，不要为了简短而省略关键依据。",
+    "除 action 的英文枚举值外，所有文本字段必须使用简体中文。",
+    "只返回一个 JSON 对象，不要 Markdown 或额外文字。严格使用：{\"action\":\"fold|checkCall|raise|allIn\",\"amount\":数字或null,\"note\":\"完整动作摘要\",\"assessment\":\"详细说明绝对牌力、相对牌力和牌面\",\"rangeAnalysis\":\"双方范围、位置与组合分析\",\"potAnalysis\":\"底池赔率、有效筹码、SPR与尺度分析\",\"factors\":[\"至少四项公开因素\"],\"alternatives\":[{\"action\":\"其他合法候选动作\",\"reason\":\"为何不选\"}],\"skillApplication\":\"采用的角色规则及具体影响\",\"strengthApplication\":\"最高竞技强度如何落实到本次决策\",\"risk\":\"主要反例、风险和不确定性\",\"confidence\":0到100的整数}。",
   ].join("\n");
 
   if (config.adapter === "minimax") {
@@ -97,7 +124,8 @@ function modelPayload(config: ServerModelConfig, contextText: string, compatibil
       system,
       messages: [{ role: "user", content: contextText }],
       stream: false,
-      max_tokens: compatibilityRetry ? 8192 : 4096,
+      max_tokens: requestedReasoning === "max" ? 32768 : 16384,
+      ...(!compatibilityRetry && /minimax-m3/i.test(config.model) ? { thinking: { type: "adaptive" } } : {}),
     };
   }
 
@@ -107,15 +135,31 @@ function modelPayload(config: ServerModelConfig, contextText: string, compatibil
     stream: false,
   };
 
+  const openAiReasoning = /^(?:gpt-5|o[134])/i.test(config.model);
   const adapters: Record<ModelAdapter, Record<string, unknown>> = {
-    openai: { max_tokens: 512, response_format: { type: "json_object" } },
-    deepseek: compatibilityRetry
-      ? { max_tokens: 1536, thinking: { type: "disabled" } }
-      : { max_tokens: 1024, thinking: { type: "disabled" }, response_format: { type: "json_object" } },
+    openai: openAiReasoning
+      ? { max_completion_tokens: requestedReasoning === "max" ? 32768 : 16384, ...(!compatibilityRetry ? { reasoning_effort: requestedReasoning === "max" ? "xhigh" : "high", response_format: { type: "json_object" } } : {}) }
+      : { max_tokens: 8192, ...(!compatibilityRetry ? { response_format: { type: "json_object" } } : {}) },
+    deepseek: {
+      max_tokens: requestedReasoning === "max" ? 32768 : 16384,
+      thinking: { type: "enabled" },
+      reasoning_effort: requestedReasoning === "max" ? "max" : "high",
+      ...(!compatibilityRetry ? { response_format: { type: "json_object" } } : {}),
+    },
     minimax: {},
-    kimi: { max_completion_tokens: 1024, thinking: { type: "disabled" }, response_format: { type: "json_object" } },
-    glm: { max_tokens: 1024, thinking: { type: "disabled" }, response_format: { type: "json_object" } },
-    generic: { max_tokens: 1024 },
+    kimi: {
+      max_completion_tokens: requestedReasoning === "max" ? 32768 : 16384,
+      ...(!compatibilityRetry ? { thinking: { type: "enabled" }, response_format: { type: "json_object" } } : {}),
+    },
+    glm: {
+      max_tokens: requestedReasoning === "max" ? 32768 : 16384,
+      ...(!compatibilityRetry ? {
+        thinking: { type: "enabled" },
+        ...(/glm-5\.2/i.test(config.model) ? { reasoning_effort: requestedReasoning === "max" ? "max" : "high" } : {}),
+        response_format: { type: "json_object" },
+      } : {}),
+    },
+    generic: { max_tokens: 8192 },
   };
   return { ...base, ...adapters[config.adapter] };
 }
@@ -153,6 +197,7 @@ export async function handleAiDecisionRequest(request: Request) {
   }
 
   const provider = body.provider?.trim().toLowerCase().slice(0, 64) || "";
+  const requestedReasoning = body.reasoning === "standard" ? "standard" : "max";
   if (!provider) return jsonError("请选择模型", 400);
   const config = getModelConfig(provider);
   if (!config) return jsonError("此模型尚未在 .env.local 配置 API Key，请保存文件并重启服务", 400);
@@ -163,10 +208,10 @@ export async function handleAiDecisionRequest(request: Request) {
   if (contextText.length > 18_000) return jsonError("牌局上下文过大", 413);
 
   const controller = new AbortController();
-  const timeoutMs = config.adapter === "minimax" ? 120_000 : config.adapter === "deepseek" ? 60_000 : 45_000;
+  const timeoutMs = config.adapter === "minimax" ? 240_000 : config.adapter === "generic" ? 90_000 : 180_000;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const supportsCompatibilityRetry = config.adapter === "deepseek" || config.adapter === "minimax";
+    const supportsCompatibilityRetry = config.adapter !== "generic";
     const attempts = supportsCompatibilityRetry ? 2 : 1;
     const endpoints = providerEndpoints(config, endpoint);
     let regionalError = "";
@@ -189,7 +234,7 @@ export async function handleAiDecisionRequest(request: Request) {
           response = await fetch(endpoints[endpointIndex], {
             method: "POST",
             headers,
-            body: JSON.stringify(modelPayload(config, contextText, attempt > 0)),
+            body: JSON.stringify(modelPayload(config, contextText, attempt > 0, requestedReasoning)),
             redirect: "error",
             signal: controller.signal,
           });
@@ -241,12 +286,25 @@ export async function handleAiDecisionRequest(request: Request) {
         return Response.json({
           action: decision.action,
           amount: typeof decision.amount === "number" && Number.isFinite(decision.amount) ? decision.amount : null,
-          note: typeof decision.note === "string" ? decision.note.slice(0, 100) : "",
-          assessment: typeof decision.assessment === "string" ? decision.assessment.slice(0, 240) : "",
+          note: typeof decision.note === "string" ? decision.note.slice(0, 320) : "",
+          assessment: typeof decision.assessment === "string" ? decision.assessment.slice(0, 2400) : "",
+          rangeAnalysis: typeof decision.rangeAnalysis === "string" ? decision.rangeAnalysis.slice(0, 2400) : "",
+          potAnalysis: typeof decision.potAnalysis === "string" ? decision.potAnalysis.slice(0, 2400) : "",
           factors: Array.isArray(decision.factors)
-            ? decision.factors.filter((item): item is string => typeof item === "string").slice(0, 4).map((item) => item.slice(0, 120))
+            ? decision.factors.filter((item): item is string => typeof item === "string").slice(0, 10).map((item) => item.slice(0, 500))
             : [],
-          skillApplication: typeof decision.skillApplication === "string" ? decision.skillApplication.slice(0, 240) : "",
+          alternatives: Array.isArray(decision.alternatives)
+            ? decision.alternatives.filter((item) => item && typeof item === "object").slice(0, 5).map((item) => {
+                const alternative = item as { action?: unknown; reason?: unknown };
+                return {
+                  action: typeof alternative.action === "string" ? alternative.action.slice(0, 40) : "",
+                  reason: typeof alternative.reason === "string" ? alternative.reason.slice(0, 1200) : "",
+                };
+              })
+            : [],
+          skillApplication: typeof decision.skillApplication === "string" ? decision.skillApplication.slice(0, 2400) : "",
+          strengthApplication: typeof decision.strengthApplication === "string" ? decision.strengthApplication.slice(0, 1600) : "",
+          risk: typeof decision.risk === "string" ? decision.risk.slice(0, 2400) : "",
           confidence: typeof decision.confidence === "number" && Number.isFinite(decision.confidence)
             ? Math.max(0, Math.min(100, Math.round(decision.confidence)))
             : null,
@@ -262,6 +320,8 @@ export async function handleAiDecisionRequest(request: Request) {
             : null,
           finishReason: config.adapter === "minimax" ? modelResponse?.stop_reason || null : choice?.finish_reason || null,
           usage: readUsage(modelResponse),
+          reasoningMode: reasoningMode(config, attempt > 0, requestedReasoning),
+          reasoningCharacters: readReasoningCharacters(modelResponse),
           output: cleanModelOutput(outputText),
         });
       }

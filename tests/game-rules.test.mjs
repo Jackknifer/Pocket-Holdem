@@ -5,10 +5,18 @@ import {
   canPlayerRaise,
   evaluateBest,
   legalRaiseBounds,
+  LOCAL_AI_PROFILE,
   newSession,
 } from "../app/game.ts";
 
 const card = (rank, suit) => ({ rank, suit, id: `${rank}${suit}` });
+
+test("the built-in opponent exposes one fixed maximum-strength profile", () => {
+  assert.equal(LOCAL_AI_PROFILE.simulations, 420);
+  assert.equal(LOCAL_AI_PROFILE.rangeInference, 1);
+  assert.ok(LOCAL_AI_PROFILE.equityWeight >= 0.9);
+  assert.ok(LOCAL_AI_PROFILE.noiseScale <= 0.02);
+});
 
 function player(id, chips, hole, extra = {}) {
   return {
@@ -23,12 +31,12 @@ function state(players, extra = {}) {
     players, deck: [], community: [], phase: "preflop", status: "playing", dealer: 0,
     currentPlayer: 0, currentBet: 0, minRaise: 20, acted: [], actedAt: {}, handNo: 1,
     smallBlind: 10, bigBlind: 20, blindLevel: 1, winners: [], message: "", log: [],
-    difficulty: "standard", lastPot: 0, ...extra,
+    lastPot: 0, ...extra,
   };
 }
 
 test("heads-up button posts the small blind, acts first preflop, and a burn card precedes the flop", () => {
-  let game = newSession("standard", 2);
+  let game = newSession(2);
   const button = game.players[game.dealer];
   const bigBlind = game.players[(game.dealer + 1) % 2];
   assert.equal(button.bet, game.smallBlind);

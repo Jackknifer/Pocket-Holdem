@@ -2,7 +2,6 @@ export type Suit = "s" | "h" | "d" | "c";
 export type Rank = 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14;
 export type Phase = "preflop" | "flop" | "turn" | "river" | "showdown";
 export type GameStatus = "playing" | "handOver" | "gameOver";
-export type Difficulty = "relaxed" | "standard" | "sharp";
 
 export interface Card {
   suit: Suit;
@@ -57,7 +56,6 @@ export interface GameState {
   winners: Winner[];
   message: string;
   log: LogEntry[];
-  difficulty: Difficulty;
   lastPot: number;
 }
 
@@ -75,6 +73,29 @@ export const suitSymbol: Record<Suit, string> = { s: "♠", h: "♥", d: "♦", 
 export const rankLabel: Record<Rank, string> = {
   2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10",
   11: "J", 12: "Q", 13: "K", 14: "A",
+};
+
+export type LocalAiProfile = {
+  simulations: number;
+  equityWeight: number;
+  noiseScale: number;
+  bluffFrequency: number;
+  rangeInference: number;
+  continueThresholdBias: number;
+  raiseThresholdBias: number;
+  callThresholdBias: number;
+};
+
+/** The built-in opponent has one deliberately strong competitive profile. */
+export const LOCAL_AI_PROFILE: LocalAiProfile = {
+  simulations: 420,
+  equityWeight: 0.9,
+  noiseScale: 0.018,
+  bluffFrequency: 0.11,
+  rangeInference: 1,
+  continueThresholdBias: 0.018,
+  raiseThresholdBias: -0.025,
+  callThresholdBias: 0.012,
 };
 
 function makeDeck(): Card[] {
@@ -117,13 +138,13 @@ function basePlayers(playerCount = 4): Player[] {
   return players.slice(0, Math.max(2, Math.min(6, Math.round(playerCount))));
 }
 
-export function newSession(difficulty: Difficulty = "standard", playerCount = 4): GameState {
+export function newSession(playerCount = 4): GameState {
   const players = basePlayers(playerCount);
   const initial: GameState = {
     players, deck: [], community: [], phase: "preflop", status: "handOver",
     dealer: Math.floor(Math.random() * players.length), currentPlayer: -1, currentBet: 0, minRaise: 20,
     acted: [], actedAt: {}, handNo: 0, smallBlind: 10, bigBlind: 20, blindLevel: 1, winners: [], message: "",
-    log: [], difficulty, lastPot: 0,
+    log: [], lastPot: 0,
   };
   return startNextHand(initial, true);
 }
@@ -464,15 +485,13 @@ function handStrength(player: Player, community: Card[]): number {
   return Math.min(1, 0.12 + category * 0.115 + (result.score[1] || 0) / 100);
 }
 
-function inferredRangeFloor(player: Player, difficulty: Difficulty): number {
+function inferredRangeFloor(player: Player): number {
   const action = player.lastAction || "";
-  let floor = action.includes("全下") ? 0.52
+  const floor = action.includes("全下") ? 0.52
     : action.includes("加注") ? 0.43
       : action.includes("下注") ? 0.34
         : action.includes("跟注") ? 0.2 : 0;
-  if (difficulty === "relaxed") floor = 0;
-  if (difficulty === "standard") floor *= 0.58;
-  return floor;
+  return floor * LOCAL_AI_PROFILE.rangeInference;
 }
 
 function drawRangedHole(pool: Card[], floor: number): { hole: Card[]; remaining: Card[] } {
@@ -504,7 +523,7 @@ export function estimateEquity(state: GameState, player: Player, simulations = 1
     let pool = shuffle(unknownDeck);
     const opponentHands: Card[][] = [];
     for (const opponent of opponents) {
-      const draw = drawRangedHole(pool, inferredRangeFloor(opponent, state.difficulty));
+      const draw = drawRangedHole(pool, inferredRangeFloor(opponent));
       opponentHands.push(draw.hole);
       pool = draw.remaining;
     }
@@ -529,33 +548,31 @@ function positionAdjustment(state: GameState, player: Player): number {
 export function chooseAiAction(state: GameState, player: Player): GameAction {
   const due = Math.max(0, state.currentBet - player.bet);
   const pot = Math.max(state.bigBlind, getPot(state));
-  const simulations = state.difficulty === "relaxed" ? 32 : state.difficulty === "sharp" ? 140 : 72;
-  const equity = estimateEquity(state, player, simulations);
+  const profile = LOCAL_AI_PROFILE;
+  const equity = estimateEquity(state, player, profile.simulations);
   const made = handStrength(player, state.community);
-  const equityWeight = state.difficulty === "relaxed" ? 0.48 : state.difficulty === "sharp" ? 0.86 : 0.7;
-  const noiseScale = state.difficulty === "relaxed" ? 0.15 : state.difficulty === "sharp" ? 0.035 : 0.08;
-  const noise = (Math.random() - 0.5) * noiseScale;
-  const strength = Math.max(0, Math.min(1, equity * equityWeight + made * (1 - equityWeight) + positionAdjustment(state, player) + noise));
+  const noise = (Math.random() - 0.5) * profile.noiseScale;
+  const strength = Math.max(0, Math.min(1, equity * profile.equityWeight + made * (1 - profile.equityWeight) + positionAdjustment(state, player) + noise));
   const potOdds = due / (pot + due);
   const stackToPot = player.chips / Math.max(pot, state.bigBlind);
   const personality = player.aggression;
   const bounds = legalRaiseBounds(state, player);
   const canRaise = bounds.max > state.currentBet;
-  const bluff = Math.random() < personality * (state.difficulty === "sharp" ? 0.1 : state.difficulty === "standard" ? 0.055 : 0.035);
+  const bluffHasEquity = equity >= 0.24 && equity <= 0.64;
+  const bluff = Math.random() < personality * profile.bluffFrequency && bluffHasEquity;
 
   if (state.phase === "preflop") {
     const activeCount = state.players.filter((candidate) => !candidate.folded && candidate.hole.length > 0).length;
     const opened = state.currentBet > state.bigBlind;
     const tableAllowance = Math.min(0.055, Math.max(0, activeCount - 2) * 0.014);
-    const difficultyAdjustment = state.difficulty === "relaxed" ? -0.04 : state.difficulty === "sharp" ? 0.015 : -0.012;
     const preflopScore = Math.max(0, Math.min(1, made + positionAdjustment(state, player) + personality * 0.04 + noise));
     const raisePressure = Math.max(0, state.currentBet / state.bigBlind - 1);
     const continueThreshold = opened
-      ? 0.5 + Math.min(0.15, raisePressure * 0.022) - personality * 0.05 + difficultyAdjustment
-      : 0.5 - tableAllowance - personality * 0.055 + difficultyAdjustment;
+      ? 0.5 + Math.min(0.15, raisePressure * 0.022) - personality * 0.05 + profile.continueThresholdBias
+      : 0.5 - tableAllowance - personality * 0.055 + profile.continueThresholdBias;
     const raiseThreshold = opened
-      ? 0.94 - personality * 0.06
-      : 0.84 - personality * 0.08 + (state.difficulty === "relaxed" ? 0.025 : 0);
+      ? 0.94 - personality * 0.06 + profile.raiseThresholdBias
+      : 0.84 - personality * 0.08 + profile.raiseThresholdBias;
     const mayRaise = !opened || (state.currentBet <= state.bigBlind * 3 && !player.lastAction.includes("加注"));
 
     if (due > 0) {
@@ -581,10 +598,10 @@ export function chooseAiAction(state: GameState, player: Player): GameAction {
     if (due >= player.chips) {
       return equity > Math.max(0.36, potOdds + 0.08 - personality * 0.05) ? { type: "allIn" } : { type: "fold" };
     }
-    const requiredEquity = potOdds + 0.055 - personality * 0.035;
+    const requiredEquity = potOdds + 0.055 - personality * 0.035 + profile.callThresholdBias;
     if (!bluff && strength < requiredEquity) return { type: "fold" };
     if (stackToPot < 1.15 && equity > 0.59 - personality * 0.05) return { type: "allIn" };
-    if (canRaise && (strength > 0.67 - personality * 0.11 || bluff)) {
+    if (canRaise && (strength > 0.67 - personality * 0.11 + profile.raiseThresholdBias || bluff)) {
       const multiplier = 0.42 + personality * 0.34 + Math.max(0, equity - 0.6) * 0.7;
       const size = state.currentBet + Math.max(state.minRaise, Math.round(pot * multiplier / 10) * 10);
       return { type: "raise", amount: Math.min(player.bet + player.chips, size) };
@@ -593,7 +610,7 @@ export function chooseAiAction(state: GameState, player: Player): GameAction {
   }
 
   if (stackToPot < 1 && equity > 0.66) return { type: "allIn" };
-  if (canRaise && (strength > 0.53 - personality * 0.12 || bluff)) {
+  if (canRaise && (strength > 0.53 - personality * 0.12 + profile.raiseThresholdBias || bluff)) {
     const size = Math.max(state.bigBlind, Math.round(pot * (0.34 + personality * 0.42) / 10) * 10);
     return { type: "raise", amount: Math.min(player.bet + player.chips, size) };
   }

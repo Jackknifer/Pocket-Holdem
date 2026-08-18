@@ -2,24 +2,26 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  applyAction, chooseAiAction, estimateEquity, evaluateBest, formatChips, getBlindProgress, getPot, legalRaiseBounds,
+  LOCAL_AI_PROFILE, applyAction, chooseAiAction, estimateEquity, evaluateBest, formatChips, getBlindProgress, getPot, legalRaiseBounds,
   newSession, phaseLabel, preflopLabel, rankLabel, startNextHand, suitSymbol,
-  type Card, type Difficulty, type GameAction, type GameState, type Player,
+  type Card, type GameAction, type GameState, type Player,
 } from "./game";
 import { OPPONENT_SKILLS } from "./ai-skills";
 
 type Settings = {
-  difficulty: Difficulty;
+  gameMode: GameMode;
   playerCount: PlayerCount;
   aiPace: AiPace;
   modelAiEnabled: boolean;
   modelProvider: string;
+  maxReasoning: boolean;
   sound: boolean;
   autoNext: boolean;
   reviewMode: ReviewMode;
 };
 
 type PlayerCount = 2 | 3 | 4 | 5 | 6;
+type GameMode = "local" | "online";
 type AiPace = "calm" | "natural" | "quick";
 type ReviewMode = "training" | "standard";
 type ModelStatus = { tone: "idle" | "working" | "ready" | "fallback"; text: string };
@@ -40,9 +42,16 @@ type ModelDecision = {
   usage?: ModelUsage | null;
   output?: string;
   assessment?: string;
+  rangeAnalysis?: string;
+  potAnalysis?: string;
   factors?: string[];
+  alternatives?: Array<{ action: string; reason: string }>;
   skillApplication?: string;
+  strengthApplication?: string;
+  risk?: string;
   confidence?: number | null;
+  reasoningMode?: string;
+  reasoningCharacters?: number | null;
 };
 type ModelActionResult = ModelDecision & { action: GameAction; provider: string; model: string; note: string };
 type ModelOption = { id: string; name: string; model: string; configured: boolean; hint: string };
@@ -65,6 +74,8 @@ type ModelAuditEntry = {
   finishReason?: string | null;
   usage?: ModelUsage | null;
   output?: string;
+  reasoningMode?: string;
+  reasoningCharacters?: number | null;
   completedAt?: number;
   createdAt: number;
 };
@@ -87,8 +98,8 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   { id: "glm", name: "GLM", model: "glm-5.2", configured: false, hint: "在 .env.local 设置 GLM_API_KEY" },
 ];
 const DEFAULT_SETTINGS: Settings = {
-  difficulty: "standard", playerCount: 4, aiPace: "calm", modelAiEnabled: false,
-  modelProvider: "openai",
+  gameMode: "local", playerCount: 4, aiPace: "calm", modelAiEnabled: false,
+  modelProvider: "openai", maxReasoning: true,
   sound: true, autoNext: false, reviewMode: "training",
 };
 const DEFAULT_STATS: Stats = { hands: 0, wins: 0, biggestPot: 0, streak: 0, bestStreak: 0 };
@@ -103,6 +114,7 @@ const MODEL_TEST_CONTEXT = {
     { id: "you", name: "你", chips: 1980, currentBet: 20, totalInvested: 20, folded: false, allIn: false, lastAction: "大盲注" },
   ],
   recentActions: ["你投入大盲注 20", "连接测试投入小盲注 10"],
+  competitiveProfile: { level: "maximum", ...LOCAL_AI_PROFILE },
   legalActions: { fold: true, checkCall: true, allIn: true, raise: true, minRaiseTo: 40, maxRaiseTo: 2000 },
 };
 
@@ -130,6 +142,7 @@ function buildModelContext(game: GameState, player: Player) {
       totalInvested: candidate.totalBet, folded: candidate.folded, allIn: candidate.allIn, lastAction: candidate.lastAction,
     })),
     recentActions: game.log.slice(0, 10).map((entry) => entry.text).reverse(),
+    competitiveProfile: { level: "maximum", ...LOCAL_AI_PROFILE },
     legalActions: {
       fold: due > 0, checkCall: true, allIn: player.chips > 0,
       raise: bounds.max > game.currentBet, minRaiseTo: bounds.min, maxRaiseTo: bounds.max,
@@ -185,11 +198,11 @@ function aiDecisionDelay(game: GameState, player: Player, pace: AiPace): number 
   return Math.max(1_400, Math.round(base + Math.random() * spread + complexityTime + shortStackAdjustment));
 }
 
-async function requestModelDecision(provider: string, context: unknown, signal: AbortSignal): Promise<ModelDecision> {
+async function requestModelDecision(provider: string, context: unknown, reasoning: "standard" | "max", signal: AbortSignal): Promise<ModelDecision> {
   const response = await fetch("/api/ai-decision", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider, context }),
+    body: JSON.stringify({ provider, context, reasoning }),
     signal,
   });
   const payload = await response.json().catch(() => ({})) as ModelDecision & { error?: string };
@@ -197,8 +210,8 @@ async function requestModelDecision(provider: string, context: unknown, signal: 
   return payload;
 }
 
-async function requestModelAction(game: GameState, player: Player, provider: string, signal: AbortSignal): Promise<ModelActionResult> {
-  const payload = await requestModelDecision(provider, buildModelContext(game, player), signal);
+async function requestModelAction(game: GameState, player: Player, provider: string, reasoning: "standard" | "max", signal: AbortSignal): Promise<ModelActionResult> {
+  const payload = await requestModelDecision(provider, buildModelContext(game, player), reasoning, signal);
   const action = normalizeModelAction(game, player, payload);
   if (!action) throw new Error("模型返回的动作无法执行");
   return {
@@ -206,7 +219,7 @@ async function requestModelAction(game: GameState, player: Player, provider: str
     action,
     provider: payload.provider || provider,
     model: payload.model || "未返回模型名",
-    note: payload.note?.slice(0, 100) || "",
+    note: payload.note?.slice(0, 240) || "",
   };
 }
 
@@ -217,6 +230,15 @@ function CardView({ card, hidden = false, delay = 0, small = false }: { card?: C
   return (
     <span className={`playing-card dealt ${red ? "card-red" : ""} ${small ? "card-small" : ""}`} style={{ animationDelay: `${delay}ms` }} aria-label={`${rankLabel[card!.rank]} ${suitSymbol[card!.suit]}`}>
       <b>{rankLabel[card!.rank]}</b><i>{suitSymbol[card!.suit]}</i>
+    </span>
+  );
+}
+
+function ReviewCardCode({ card }: { card: Card }) {
+  const red = card.suit === "h" || card.suit === "d";
+  return (
+    <span className={`review-card-code ${red ? "is-red" : ""}`} aria-label={cardCode(card)}>
+      <b>{rankLabel[card.rank]}</b><i>{suitSymbol[card.suit]}</i>
     </span>
   );
 }
@@ -288,6 +310,8 @@ export default function Home() {
   const [modelStatus, setModelStatus] = useState<ModelStatus>({ tone: "idle", text: "正在读取本地模型配置" });
   const [modelAudit, setModelAudit] = useState<ModelAuditEntry[]>([]);
   const recordedHand = useRef(0);
+  const soundedHand = useRef(0);
+  const soundedBoard = useRef("");
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -301,11 +325,12 @@ export default function Home() {
         if (storedSettings) {
           const parsedSettings = JSON.parse(storedSettings) as Partial<Settings>;
           nextSettings = {
-            difficulty: ["relaxed", "standard", "sharp"].includes(String(parsedSettings.difficulty)) ? parsedSettings.difficulty as Difficulty : DEFAULT_SETTINGS.difficulty,
+            gameMode: "local",
             playerCount: [2, 3, 4, 5, 6].includes(Number(parsedSettings.playerCount)) ? parsedSettings.playerCount as PlayerCount : DEFAULT_SETTINGS.playerCount,
             aiPace: ["calm", "natural", "quick"].includes(String(parsedSettings.aiPace)) ? parsedSettings.aiPace as AiPace : DEFAULT_SETTINGS.aiPace,
             modelAiEnabled: Boolean(parsedSettings.modelAiEnabled),
             modelProvider: typeof parsedSettings.modelProvider === "string" ? parsedSettings.modelProvider : DEFAULT_SETTINGS.modelProvider,
+            maxReasoning: parsedSettings.maxReasoning ?? DEFAULT_SETTINGS.maxReasoning,
             sound: parsedSettings.sound ?? DEFAULT_SETTINGS.sound,
             autoNext: parsedSettings.autoNext ?? DEFAULT_SETTINGS.autoNext,
             reviewMode: ["training", "standard"].includes(String(parsedSettings.reviewMode)) ? parsedSettings.reviewMode as ReviewMode : DEFAULT_SETTINGS.reviewMode,
@@ -382,30 +407,58 @@ export default function Home() {
     ? game && game.community.length >= 3 ? evaluateBest([...human.hole, ...game.community]).label : preflopLabel(human.hole)
     : "等待发牌";
 
-  const playTone = useCallback((kind: "soft" | "confirm" | "win") => {
-    if (!settings.sound || typeof window === "undefined") return;
+  const playTone = useCallback((kind: "deal" | "turn" | "action" | "raise" | "fold" | "win" | "lose", force = false) => {
+    if ((!settings.sound && !force) || typeof window === "undefined") return;
     try {
       const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!AudioContextClass) return;
       const context = new AudioContextClass();
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.type = "sine";
-      oscillator.frequency.value = kind === "win" ? 520 : kind === "confirm" ? 360 : 240;
-      gain.gain.setValueAtTime(0.035, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.12);
-      oscillator.connect(gain); gain.connect(context.destination);
-      oscillator.start(); oscillator.stop(context.currentTime + 0.13);
+      const patterns: Record<typeof kind, Array<[number, number, number, number]>> = {
+        deal: [[220, 0, .045, .016], [285, .065, .055, .018]],
+        turn: [[420, 0, .08, .024], [560, .1, .12, .028]],
+        action: [[275, 0, .07, .017]],
+        raise: [[310, 0, .065, .02], [410, .075, .09, .023]],
+        fold: [[235, 0, .06, .018], [185, .065, .08, .015]],
+        win: [[392, 0, .09, .024], [523, .1, .1, .027], [659, .21, .16, .03]],
+        lose: [[294, 0, .1, .018], [247, .11, .15, .016]],
+      };
+      for (const [frequency, offset, duration, volume] of patterns[kind]) {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        const start = context.currentTime + offset;
+        oscillator.type = kind === "deal" || kind === "action" ? "sine" : "triangle";
+        oscillator.frequency.setValueAtTime(frequency, start);
+        gain.gain.setValueAtTime(volume, start);
+        gain.gain.exponentialRampToValueAtTime(0.001, start + duration);
+        oscillator.connect(gain); gain.connect(context.destination);
+        oscillator.start(start); oscillator.stop(start + duration + .01);
+      }
+      window.setTimeout(() => { void context.close(); }, 650);
     } catch { /* Audio is optional. */ }
   }, [settings.sound]);
 
   useEffect(() => {
-    if (isHumanTurn) playTone("confirm");
+    if (isHumanTurn) playTone("turn");
   }, [isHumanTurn, playTone]);
+
+  useEffect(() => {
+    if (!game || game.status !== "playing" || soundedHand.current === game.handNo) return;
+    soundedHand.current = game.handNo;
+    soundedBoard.current = `${game.handNo}:0`;
+    playTone("deal");
+  }, [game, playTone]);
+
+  useEffect(() => {
+    if (!game || game.status !== "playing" || game.community.length === 0) return;
+    const boardKey = `${game.handNo}:${game.community.length}`;
+    if (soundedBoard.current === boardKey) return;
+    soundedBoard.current = boardKey;
+    playTone("deal");
+  }, [game, playTone]);
 
   const act = useCallback((action: GameAction) => {
     if (!game || !human || !isHumanTurn) return;
-    playTone(action.type === "fold" ? "soft" : "confirm");
+    playTone(action.type === "fold" ? "fold" : action.type === "raise" || action.type === "allIn" ? "raise" : "action");
     setShowRaise(false);
     setGame((current) => current ? applyAction(current, human.id, action) : current);
   }, [game, human, isHumanTurn, playTone]);
@@ -433,7 +486,7 @@ export default function Home() {
         setModelThinkingId(player.id);
         setModelStatus({ tone: "working", text: `${player.name} 正在请求 ${selectedModel?.model || providerName}` });
         try {
-          const result = await requestModelAction(game, player, settings.modelProvider, controller.signal);
+          const result = await requestModelAction(game, player, settings.modelProvider, settings.maxReasoning ? "max" : "standard", controller.signal);
           action = result.action;
           updateModelAudit(auditId, {
             status: "success", provider: providerName, model: result.model,
@@ -446,6 +499,8 @@ export default function Home() {
             region: result.region,
             finishReason: result.finishReason,
             usage: result.usage,
+            reasoningMode: result.reasoningMode,
+            reasoningCharacters: result.reasoningCharacters,
             output: result.output,
             completedAt: Date.now(),
           });
@@ -466,6 +521,7 @@ export default function Home() {
           detail: fallbackDetail || "模型未返回可执行动作", completedAt: Date.now(),
         });
       }
+      playTone(action.type === "fold" ? "fold" : action.type === "raise" || action.type === "allIn" ? "raise" : "action");
       setGame((current) => {
         if (!current || current.status !== "playing" || current.handNo !== game.handNo) return current;
         const actor = current.players[current.currentPlayer];
@@ -474,7 +530,7 @@ export default function Home() {
       });
     }, wait);
     return () => { cancelled = true; controller.abort(); window.clearTimeout(timeout); };
-  }, [game, settings.aiPace, settings.modelAiEnabled, settings.modelProvider, modelOptions, addModelAudit, updateModelAudit]);
+  }, [game, settings.aiPace, settings.maxReasoning, settings.modelAiEnabled, settings.modelProvider, modelOptions, addModelAudit, updateModelAudit, playTone]);
 
   useEffect(() => {
     const reset = window.setTimeout(() => setTimer(24), 0);
@@ -500,7 +556,7 @@ export default function Home() {
         streak, bestStreak: Math.max(current.bestStreak, streak),
       };
     });
-    if (won) playTone("win");
+    playTone(won ? "win" : "lose");
   }, [game, playTone]);
 
   useEffect(() => {
@@ -528,7 +584,7 @@ export default function Home() {
     localStorage.removeItem("pocket-active-session");
     setSavedSession(null);
     setModelAudit([]);
-    setGame(newSession(settings.difficulty, settings.playerCount));
+    setGame(newSession(settings.playerCount));
     setPanel(null); setShowRaise(false); recordedHand.current = 0;
   };
 
@@ -543,13 +599,12 @@ export default function Home() {
   const resumeSession = () => {
     if (!savedSession) return;
     if (savedSession.game.status === "handOver") recordedHand.current = savedSession.game.handNo;
-    setGame({ ...savedSession.game, difficulty: settings.difficulty });
+    setGame(savedSession.game);
     setSavedSession(null);
   };
 
   const updateSetting = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     setSettings((current) => ({ ...current, [key]: value }));
-    if (key === "difficulty") setGame((current) => current ? { ...current, difficulty: value as Difficulty } : current);
   };
 
   const selectModel = async (providerId: string | null) => {
@@ -565,11 +620,11 @@ export default function Home() {
     }
     setSettings((current) => ({ ...current, modelProvider: selected.id, modelAiEnabled: true }));
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), selected.id === "minimax" ? 125_000 : 70_000);
+    const timeout = window.setTimeout(() => controller.abort(), selected.id === "minimax" ? 245_000 : 185_000);
     setTestingModel(true);
     setModelStatus({ tone: "working", text: `正在连接 ${selected.name} · ${selected.model}` });
     try {
-      const result = await requestModelDecision(selected.id, MODEL_TEST_CONTEXT, controller.signal);
+      const result = await requestModelDecision(selected.id, MODEL_TEST_CONTEXT, settings.maxReasoning ? "max" : "standard", controller.signal);
       if (!["fold", "checkCall", "raise", "allIn"].includes(String(result.action))) throw new Error("模型返回的动作无效");
       setModelStatus({ tone: "ready", text: `连接成功 · ${result.model || selected.model}` });
     } catch (error) {
@@ -618,7 +673,11 @@ export default function Home() {
           <button className="icon-button audit-button" onClick={() => setLogOpen((value) => !value)} aria-label="行动与模型调用记录"><TinyIcon name="history" />{modelAudit[0] && <i className={`audit-light ${modelAudit[0].status}`} />}</button>
           <button
             className={`icon-button sound-toggle ${settings.sound ? "is-on" : "is-muted"}`}
-            onClick={() => updateSetting("sound", !settings.sound)}
+            onClick={() => {
+              const enabled = !settings.sound;
+              updateSetting("sound", enabled);
+              if (enabled) playTone("turn", true);
+            }}
             aria-label={settings.sound ? "声音已开启，点击关闭" : "声音已关闭，点击开启"}
             aria-pressed={settings.sound}
             title={settings.sound ? "声音已开启，点击关闭" : "声音已关闭，点击开启"}
@@ -676,7 +735,7 @@ export default function Home() {
                     return (
                       <article className={`${player.folded ? "folded" : ""} ${winnerIds.has(player.id) ? "winner" : ""}`} key={player.id}>
                         <span>{player.avatar}</span>
-                        <div><strong>{player.name}</strong><b>{player.hole.map(cardCode).join("  ")}</b><small>{label} · {winnerIds.has(player.id) ? "赢得底池" : player.folded ? "已弃牌" : "参与摊牌"}</small></div>
+                        <div><strong>{player.name}</strong><div className="review-hole-cards">{player.hole.map((card) => <ReviewCardCode card={card} key={card.id} />)}</div><small>{label} · {winnerIds.has(player.id) ? "赢得底池" : player.folded ? "已弃牌" : "参与摊牌"}</small></div>
                       </article>
                     );
                   })}
@@ -718,6 +777,8 @@ export default function Home() {
                         {entry.region && <span>{entry.region}</span>}
                         {entry.recovered && <span>{entry.recovery === "region" ? "区域恢复" : "格式恢复"}</span>}
                         {entry.usage && <span>Token {entry.usage.input} → {entry.usage.output}</span>}
+                        {entry.reasoningMode && <span>推理：{["max", "xhigh"].includes(entry.reasoningMode) ? "极致" : entry.reasoningMode === "high" ? "标准" : entry.reasoningMode === "native" ? "模型原生" : entry.reasoningMode === "adaptive" ? "自适应" : entry.reasoningMode === "enabled" ? "已开启" : "模型默认"}</span>}
+                        {entry.reasoningCharacters && <span>内部推理 {entry.reasoningCharacters} 字符</span>}
                         {entry.finishReason && <span>结束：{entry.finishReason}</span>}
                         {entry.requestId && <code title={entry.requestId}>ID {entry.requestId}</code>}
                       </div>
@@ -777,13 +838,11 @@ export default function Home() {
               <>
                 <span className="modal-kicker">偏好</span><h2 id="modal-title">游戏设置</h2>
                 <div className="settings-section">
-                  <div className="settings-section-title"><strong>对手</strong><small>牌局中仍可调整，下一次决策生效</small></div>
-                  <div className="setting-group"><span className="setting-label">对手强度</span><div className="segment-control">
-                    {(["relaxed", "standard", "sharp"] as Difficulty[]).map((value) => <button key={value} className={settings.difficulty === value ? "active" : ""} onClick={() => updateSetting("difficulty", value)}>{{ relaxed: "轻松", standard: "标准", sharp: "敏锐" }[value]}</button>)}
-                  </div><small>影响本地 AI 的判断、诈唬与容错；模型对手仍遵循各自技能。</small></div>
+                  <div className="settings-section-title"><strong>对手决策</strong><small>本地 AI 始终使用最高强度</small></div>
                   <div className="setting-group modal-pace"><span className="setting-label">思考节奏</span><div className="segment-control">
                     {(["calm", "natural", "quick"] as AiPace[]).map((value) => <button key={value} className={settings.aiPace === value ? "active" : ""} onClick={() => updateSetting("aiPace", value)}>{{ calm: "比赛", natural: "自然", quick: "紧凑" }[value]}</button>)}
                   </div><small>{settings.aiPace === "calm" ? "约 5.5–11 秒，复杂局面会多思考片刻。" : settings.aiPace === "quick" ? "约 1.8–5 秒，仍保留行动停顿。" : "约 3.5–8 秒，接近常见线上节奏。"}</small></div>
+                  <Toggle label="模型极致思考" detail="开启时请求模型支持的最高推理档；关闭时使用标准推理深度" checked={settings.maxReasoning} onChange={(value) => updateSetting("maxReasoning", value)} />
                 </div>
                 <div className="settings-section">
                   <div className="settings-section-title"><strong>复盘</strong><small>只影响结算后的底牌展示</small></div>
@@ -847,7 +906,6 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const provider = modelOptions.find((item) => item.id === settings.modelProvider) || modelOptions[0] || DEFAULT_MODEL_OPTIONS[0];
   const availableModels = modelOptions.filter((item) => item.configured);
-  const difficultyLabel = { relaxed: "轻松", standard: "标准", sharp: "敏锐" }[settings.difficulty];
   const paceLabel = { calm: "比赛", natural: "自然", quick: "紧凑" }[settings.aiPace];
   const modelDetail = settings.modelAiEnabled
     ? provider.configured ? `${provider.name} · ${provider.model}` : provider.hint
@@ -880,7 +938,7 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
               <p>确认本场偏好。只有点击开始后，牌局才会正式创建。</p>
             </div>
             <dl className="lobby-basics" aria-label="固定对局信息">
-              <div><dt>模式</dt><dd>单机牌局</dd></div>
+              <div><dt>规则</dt><dd>无限注德州</dd></div>
               <div><dt>起始筹码</dt><dd>2,000</dd></div>
               <div><dt>初始盲注</dt><dd>10 / 20</dd></div>
             </dl>
@@ -889,19 +947,18 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
             <div className="lobby-config">
               <div className="lobby-section-head">
                 <span><strong id="lobby-settings-title">对局设置</strong><small>只保留开局前需要选择的内容</small></span>
-                <em>4 项</em>
+                <button type="button" className={`lobby-reasoning-toggle ${settings.maxReasoning ? "is-on" : ""}`} role="switch" aria-checked={settings.maxReasoning} onClick={() => onSetting("maxReasoning", !settings.maxReasoning)}>
+                  <span><b>模型极致思考</b><small>{settings.maxReasoning ? "最高推理档" : "标准推理档"}</small></span><i />
+                </button>
               </div>
               <div className="lobby-controls-grid">
                 <div className="setting-group lobby-control-card">
-                  <span className="setting-label">对手强度</span>
+                  <span className="setting-label">对局模式</span>
                   <div className="segment-control">
-                    {(["relaxed", "standard", "sharp"] as Difficulty[]).map((value) => (
-                      <button key={value} className={settings.difficulty === value ? "active" : ""} onClick={() => onSetting("difficulty", value)}>
-                        {{ relaxed: "轻松", standard: "标准", sharp: "敏锐" }[value]}
-                      </button>
-                    ))}
+                    <button className="active" onClick={() => onSetting("gameMode", "local")}>本地对局</button>
+                    <button disabled aria-disabled="true" title="联机对局正在开发中">联机对局 <em>即将开放</em></button>
                   </div>
-                  <small>{settings.difficulty === "relaxed" ? "波动更大，适合熟悉规则。" : settings.difficulty === "sharp" ? "判断稳定，也会克制诈唬。" : "判断与随机性平衡，推荐。"}</small>
+                  <small>牌局与记录只保存在本机；联机模式暂不开放。</small>
                 </div>
                 <div className="setting-group lobby-control-card lobby-player-count">
                   <span className="setting-label">对局人数</span>
@@ -953,7 +1010,7 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                 </div>
               )}
               <div className="lobby-selection-line" aria-label="当前选择">
-                <span>当前选择</span><b>{settings.playerCount} 人</b><i /><b>{difficultyLabel}</b><i /><b>{paceLabel}</b><i /><b>{settings.modelAiEnabled ? provider.name : "本地 AI"}</b>
+                <span>当前选择</span><b>本地对局</b><i /><b>{settings.playerCount} 人</b><i /><b>{paceLabel}</b><i /><b>{settings.modelAiEnabled ? provider.name : "本地 AI · 最高强度"}</b>
               </div>
               <div className="lobby-history" aria-label="本机历史记录">
                 <span>本机记录</span><b>{stats.hands} 手牌</b><i /><b>{winRate}% 胜率</b><i /><b>最大 {formatChips(stats.biggestPot)}</b>
