@@ -417,6 +417,7 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(css, /\.lobby-model-card/);
   assert.match(css, /\.lobby-model-tools/);
   assert.match(css, /\.lobby-model-reasoning-toggle\s*\{[^}]*justify-content:\s*space-between/i);
+  assert.match(css, /@media \(hover:\s*hover\) and \(pointer:\s*fine\)[\s\S]*?\.lobby-control-card:hover[\s\S]*?transform:\s*translateY\(-2px\)/i);
   assert.doesNotMatch(css, /\.decision-insight/);
   assert.match(css, /\.audit-light\.success/);
   assert.doesNotMatch(css, /#2f5a4a|green felt|casino/i);

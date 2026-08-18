@@ -269,7 +269,7 @@ kbd { margin-left: 9px; padding: 2px 4px; border: 1px solid currentColor; border
 .lobby-section-head strong { font-size: 16px; }.lobby-section-head small { margin-top: 5px; color: var(--muted); font-size: 11px; font-weight: 400; }
 .lobby-section-head em { padding: 8px 11px; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--muted); font-size: 11px; font-style: normal; font-weight: 650; }
 .lobby-controls-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
-.lobby-control-card { min-width: 0; min-height: 136px; margin: 0; padding: 17px; border: 1px solid var(--line); border-radius: 14px; background: white; }
+.lobby-control-card { min-width: 0; min-height: 136px; margin: 0; padding: 17px; border: 1px solid var(--line); border-radius: 14px; background: white; transition: transform .18s ease,border-color .18s ease,box-shadow .18s ease; }
 .lobby-control-card .setting-label { margin-bottom: 10px; font-size: 13px; }
 .lobby-control-card .segment-control { padding: 2px; border-radius: 9px; }
 .lobby-control-card .segment-control button { height: 40px; border-radius: 8px; font-size: 12px; }
@@ -277,7 +277,7 @@ kbd { margin-left: 9px; padding: 2px 4px; border: 1px solid currentColor; border
 .lobby-player-count .segment-control button { font-size: 12px; }
 .lobby-model-picker { min-width: 0; position: relative; z-index: 1; }
 .lobby-model-picker.is-open { z-index: 12; }
-.lobby-model-card { min-height: 136px; display: grid; grid-template-rows: minmax(0,1fr) 40px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: white; transition: border-color .16s,box-shadow .16s; }.lobby-model-card:hover { border-color: #b9b8b1; box-shadow: 0 7px 20px rgba(32,32,29,.05); }
+.lobby-model-card { min-height: 136px; display: grid; grid-template-rows: minmax(0,1fr) 40px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: white; transition: transform .18s ease,border-color .18s ease,box-shadow .18s ease; }
 .lobby-model-entry { width: 100%; min-height: 0; padding: 11px 16px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 13px; border: 0; background: transparent; color: var(--ink); cursor: pointer; text-align: left; }
 .lobby-model-entry:hover { background: #fdfdfb; }
 .lobby-model-symbol { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 13px; background: var(--ink); color: white; font-size: 11px; font-weight: 750; letter-spacing: .04em; }
@@ -308,6 +308,10 @@ kbd { margin-left: 9px; padding: 2px 4px; border: 1px solid currentColor; border
 .start-note { margin: 8px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
 .saved-session-card { width: min(440px,100%); min-height: 56px; margin: 0 0 3px; padding: 7px 9px 7px 12px; display: grid; grid-template-columns: 1fr 1fr auto; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.75); }
 .saved-session-card span small,.saved-session-card span strong { display: block; }.saved-session-card span small { margin-bottom: 4px; color: var(--muted); font-size: 10px; }.saved-session-card span strong { font-size: 13px; font-variant-numeric: tabular-nums; }.saved-session-card button { height: 36px; padding: 0 13px; border: 1px solid var(--ink); border-radius: 9px; background: var(--ink); color: white; cursor: pointer; font-size: 11px; }
+
+@media (hover: hover) and (pointer: fine) {
+  .lobby-control-card:hover,.lobby-control-card:focus-within,.lobby-model-card:hover,.lobby-model-card:focus-within { transform: translateY(-2px); border-color: #b9b8b1; box-shadow: 0 9px 24px rgba(32,32,29,.07); }
+}
 
 @keyframes deal { to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes thinking { 0%,70%,100% { opacity: .2; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
@@ -479,4 +483,5 @@ kbd { margin-left: 9px; padding: 2px 4px; border: 1px solid currentColor; border
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .lobby-control-card,.lobby-model-card { transform: none !important; }
 }
