@@ -23,6 +23,7 @@ export interface Player {
   avatar: string;
   note: string;
   aggression: number;
+  lastAction: string;
 }
 
 export interface Winner {
@@ -48,9 +49,11 @@ export interface GameState {
   currentBet: number;
   minRaise: number;
   acted: string[];
+  actedAt: Record<string, number>;
   handNo: number;
   smallBlind: number;
   bigBlind: number;
+  blindLevel: number;
   winners: Winner[];
   message: string;
   log: LogEntry[];
@@ -66,6 +69,7 @@ export type GameAction =
 
 const SUITS: Suit[] = ["s", "h", "d", "c"];
 const RANKS: Rank[] = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+const BLIND_LEVELS: Array<[number, number]> = [[10, 20], [15, 30], [25, 50], [40, 80], [60, 120], [100, 200], [150, 300], [250, 500]];
 
 export const suitSymbol: Record<Suit, string> = { s: "♠", h: "♥", d: "♦", c: "♣" };
 export const rankLabel: Record<Rank, string> = {
@@ -101,30 +105,34 @@ function addLog(state: GameState, text: string, tone: LogEntry["tone"] = "muted"
   };
 }
 
-function basePlayers(): Player[] {
-  return [
-    { id: "you", name: "你", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: true, avatar: "你", note: "你的座位", aggression: 0.5 },
-    { id: "mira", name: "Mira", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "M", note: "沉稳 · 紧手", aggression: 0.35 },
-    { id: "knox", name: "Knox", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "K", note: "敏锐 · 均衡", aggression: 0.58 },
-    { id: "aria", name: "Aria", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "A", note: "大胆 · 激进", aggression: 0.78 },
+function basePlayers(playerCount = 4): Player[] {
+  const players: Player[] = [
+    { id: "you", name: "你", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: true, avatar: "你", note: "你的座位", aggression: 0.5, lastAction: "" },
+    { id: "mira", name: "Mira", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "M", note: "沉稳 · 紧手", aggression: 0.35, lastAction: "" },
+    { id: "knox", name: "Knox", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "K", note: "敏锐 · 均衡", aggression: 0.58, lastAction: "" },
+    { id: "aria", name: "Aria", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "A", note: "大胆 · 激进", aggression: 0.78, lastAction: "" },
+    { id: "theo", name: "Theo", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "T", note: "理性 · 观察", aggression: 0.48, lastAction: "" },
+    { id: "nova", name: "Nova", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "N", note: "灵活 · 难测", aggression: 0.67, lastAction: "" },
   ];
+  return players.slice(0, Math.max(2, Math.min(6, Math.round(playerCount))));
 }
 
-export function newSession(difficulty: Difficulty = "standard"): GameState {
+export function newSession(difficulty: Difficulty = "standard", playerCount = 4): GameState {
+  const players = basePlayers(playerCount);
   const initial: GameState = {
-    players: basePlayers(), deck: [], community: [], phase: "preflop", status: "handOver",
-    dealer: Math.floor(Math.random() * 4), currentPlayer: -1, currentBet: 0, minRaise: 20,
-    acted: [], handNo: 0, smallBlind: 10, bigBlind: 20, winners: [], message: "",
+    players, deck: [], community: [], phase: "preflop", status: "handOver",
+    dealer: Math.floor(Math.random() * players.length), currentPlayer: -1, currentBet: 0, minRaise: 20,
+    acted: [], actedAt: {}, handNo: 0, smallBlind: 10, bigBlind: 20, blindLevel: 1, winners: [], message: "",
     log: [], difficulty, lastPot: 0,
   };
   return startNextHand(initial, true);
 }
 
-function postBlind(players: Player[], index: number, amount: number): Player[] {
+function postBlind(players: Player[], index: number, amount: number, label: string): Player[] {
   return players.map((player, i) => {
     if (i !== index) return player;
     const paid = Math.min(player.chips, amount);
-    return { ...player, chips: player.chips - paid, bet: paid, totalBet: paid, allIn: player.chips === paid };
+    return { ...player, chips: player.chips - paid, bet: paid, totalBet: paid, allIn: player.chips === paid, lastAction: `${label} ${paid}` };
   });
 }
 
@@ -136,8 +144,11 @@ export function startNextHand(previous: GameState, first = false): GameState {
   }
 
   const deck = shuffle(makeDeck());
+  const handNo = previous.handNo + 1;
+  const blindLevel = Math.min(BLIND_LEVELS.length, Math.floor((handNo - 1) / 5) + 1);
+  const [smallBlind, bigBlind] = BLIND_LEVELS[blindLevel - 1];
   let players = previous.players.map((player) => ({
-    ...player, hole: [] as Card[], bet: 0, totalBet: 0, folded: player.chips <= 0, allIn: false,
+    ...player, hole: [] as Card[], bet: 0, totalBet: 0, folded: player.chips <= 0, allIn: false, lastAction: player.chips <= 0 ? "已出局" : "等待行动",
   }));
   const dealer = first ? previous.dealer : nextSeat(players, previous.dealer, (player) => player.chips > 0);
   const activeCount = players.filter((player) => player.chips > 0).length;
@@ -153,15 +164,15 @@ export function startNextHand(previous: GameState, first = false): GameState {
     }
   }
 
-  players = postBlind(players, smallIndex, previous.smallBlind);
-  players = postBlind(players, bigIndex, previous.bigBlind);
+  players = postBlind(players, smallIndex, smallBlind, "小盲");
+  players = postBlind(players, bigIndex, bigBlind, "大盲");
   const currentPlayer = nextSeat(players, bigIndex, (player) => !player.folded && !player.allIn && player.chips > 0);
-  const handNo = previous.handNo + 1;
   const state: GameState = {
     ...previous, players, deck, community: [], phase: "preflop", status: "playing", dealer,
-    currentPlayer, currentBet: Math.max(...players.map((player) => player.bet)), minRaise: previous.bigBlind,
-    acted: [], handNo, winners: [], message: "新一手牌", lastPot: 0,
-    log: [{ id: Date.now(), text: `第 ${handNo} 手牌 · 盲注 ${previous.smallBlind} / ${previous.bigBlind}`, tone: "strong" }],
+    currentPlayer, currentBet: bigBlind, minRaise: bigBlind,
+    smallBlind, bigBlind, blindLevel,
+    acted: [], actedAt: {}, handNo, winners: [], message: "新一手牌", lastPot: 0,
+    log: [{ id: Date.now(), text: `第 ${handNo} 手牌 · 盲注 ${smallBlind} / ${bigBlind}`, tone: "strong" }],
   };
   return currentPlayer === -1 ? runToShowdown(state) : state;
 }
@@ -184,12 +195,15 @@ function roundIsComplete(state: GameState): boolean {
 }
 
 function awardUncontested(state: GameState, winner: Player): GameState {
-  const pot = getPot(state);
-  const players = state.players.map((player) => player.id === winner.id ? { ...player, chips: player.chips + pot } : player);
+  const committed = getPot(state);
+  const matchedByOpponent = Math.max(0, ...state.players.filter((player) => player.id !== winner.id).map((player) => player.totalBet));
+  const uncalled = Math.max(0, winner.totalBet - matchedByOpponent);
+  const pot = committed - uncalled;
+  const players = state.players.map((player) => player.id === winner.id ? { ...player, chips: player.chips + committed, lastAction: `赢得 ${pot}` } : player);
   return addLog({
     ...state, players, status: "handOver", currentPlayer: -1, winners: [{ ids: [winner.id], amount: pot, label: "其余玩家弃牌" }],
     message: `${winner.name} 收下 ${pot}`, lastPot: pot,
-  }, `${winner.name} 收下底池 ${pot}`, "strong");
+  }, `${winner.name} 收下底池 ${pot}${uncalled ? `，退回未被跟注 ${uncalled}` : ""}`, "strong");
 }
 
 function progressAfterAction(state: GameState, actorIndex: number): GameState {
@@ -209,13 +223,14 @@ function advanceStreet(state: GameState): GameState {
   const count = state.phase === "preflop" ? 3 : 1;
   if (state.phase === "flop") phase = "turn";
   if (state.phase === "turn") phase = "river";
+  deck.pop(); // 正式牌局每条公共牌街先烧一张牌。
   for (let i = 0; i < count; i += 1) {
     const card = deck.pop();
     if (card) community.push(card);
   }
   const players = state.players.map((player) => ({ ...player, bet: 0 }));
   const nextState: GameState = {
-    ...state, players, deck, community, phase, currentBet: 0, minRaise: state.bigBlind, acted: [],
+    ...state, players, deck, community, phase, currentBet: 0, minRaise: state.bigBlind, acted: [], actedAt: {},
     message: phase === "flop" ? "翻牌" : phase === "turn" ? "转牌" : "河牌",
   };
   const actionable = players.filter((player) => !player.folded && !player.allIn && player.chips > 0);
@@ -227,10 +242,21 @@ function advanceStreet(state: GameState): GameState {
 function runToShowdown(state: GameState): GameState {
   const next = { ...state, deck: [...state.deck], community: [...state.community] };
   while (next.community.length < 5) {
-    const card = next.deck.pop();
-    if (card) next.community.push(card);
+    next.deck.pop();
+    const count = next.community.length === 0 ? 3 : 1;
+    for (let i = 0; i < count; i += 1) {
+      const card = next.deck.pop();
+      if (card) next.community.push(card);
+    }
   }
   return showdown({ ...next, phase: "river" });
+}
+
+export function canPlayerRaise(state: GameState, player: Player): boolean {
+  const maxTarget = player.bet + player.chips;
+  if (player.folded || player.allIn || maxTarget <= state.currentBet) return false;
+  const lastActedAt = state.actedAt?.[player.id];
+  return lastActedAt === undefined || state.currentBet - lastActedAt >= state.minRaise;
 }
 
 export function applyAction(state: GameState, playerId: string, action: GameAction): GameState {
@@ -240,13 +266,15 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
   const actor = state.players[actorIndex];
   const players = [...state.players];
   let acted = [...state.acted];
+  const actedAt = { ...(state.actedAt || {}) };
   let currentBet = state.currentBet;
   let minRaise = state.minRaise;
   let text = "";
 
   if (action.type === "fold") {
-    players[actorIndex] = { ...actor, folded: true };
+    players[actorIndex] = { ...actor, folded: true, lastAction: "弃牌" };
     acted = [...new Set([...acted, actor.id])];
+    actedAt[actor.id] = currentBet;
     text = `${actor.name} 弃牌`;
   } else if (action.type === "checkCall") {
     const due = Math.max(0, currentBet - actor.bet);
@@ -254,19 +282,31 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
     players[actorIndex] = {
       ...actor, chips: actor.chips - paid, bet: actor.bet + paid, totalBet: actor.totalBet + paid,
       allIn: actor.chips === paid && paid > 0,
+      lastAction: due === 0 ? "过牌" : paid < due ? `全下 ${paid}` : `跟注 ${paid}`,
     };
     acted = [...new Set([...acted, actor.id])];
+    actedAt[actor.id] = currentBet;
     text = due === 0 ? `${actor.name} 过牌` : paid < due ? `${actor.name} 全下 ${paid}` : `${actor.name} 跟注 ${paid}`;
   } else {
     const maxTarget = actor.bet + actor.chips;
-    const requested = action.type === "allIn" ? maxTarget : action.amount;
-    const target = Math.max(actor.bet, Math.min(maxTarget, requested));
+    const raiseOpen = canPlayerRaise(state, actor);
+    const callTarget = Math.min(maxTarget, currentBet);
+    const minimumTarget = currentBet + minRaise;
+    let target = callTarget;
+    if (raiseOpen && maxTarget > currentBet) {
+      if (action.type === "allIn") target = maxTarget;
+      else if (maxTarget < minimumTarget) target = maxTarget;
+      else target = Math.max(minimumTarget, Math.min(maxTarget, action.amount));
+    }
     const paid = target - actor.bet;
     const previousBet = currentBet;
+    const isAllIn = paid > 0 && actor.chips === paid;
+    const isRaise = target > previousBet;
     players[actorIndex] = {
-      ...actor, chips: actor.chips - paid, bet: target, totalBet: actor.totalBet + paid, allIn: actor.chips === paid,
+      ...actor, chips: actor.chips - paid, bet: target, totalBet: actor.totalBet + paid, allIn: isAllIn,
+      lastAction: isAllIn ? `全下 ${target}` : isRaise ? previousBet === 0 ? `下注 ${target}` : `加注至 ${target}` : previousBet > actor.bet ? `跟注 ${paid}` : "过牌",
     };
-    if (target > currentBet) {
+    if (isRaise) {
       const raiseSize = target - currentBet;
       currentBet = target;
       if (raiseSize >= minRaise) {
@@ -278,12 +318,14 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
     } else {
       acted = [...new Set([...acted, actor.id])];
     }
-    text = action.type === "allIn" || actor.chips === paid
+    actedAt[actor.id] = currentBet;
+    text = isAllIn
       ? `${actor.name} 全下 ${paid}`
-      : previousBet === 0 ? `${actor.name} 下注到 ${target}` : `${actor.name} 加注到 ${target}`;
+      : isRaise ? previousBet === 0 ? `${actor.name} 下注到 ${target}` : `${actor.name} 加注到 ${target}`
+        : previousBet > actor.bet ? `${actor.name} 跟注 ${paid}` : `${actor.name} 过牌`;
   }
 
-  const next = addLog({ ...state, players, acted, currentBet, minRaise, message: text }, text);
+  const next = addLog({ ...state, players, acted, actedAt, currentBet, minRaise, message: text }, text);
   return progressAfterAction(next, actorIndex);
 }
 
@@ -310,7 +352,7 @@ function evaluateFive(cards: Card[]): EvaluatedHand {
   }
   if (flush && straightHigh) return { score: [8, straightHigh], label: straightHigh === 14 ? "皇家同花顺" : "同花顺" };
   if (groups[0][1] === 4) return { score: [7, groups[0][0], groups[1][0]], label: "四条" };
-  if (groups[0][1] === 3 && groups[1][1] === 2) return { score: [6, groups[0][0], groups[1][0]], label: "葫芦" };
+  if (groups[0][1] === 3 && groups[1][1] >= 2) return { score: [6, groups[0][0], groups[1][0]], label: "葫芦" };
   if (flush) return { score: [5, ...ranks], label: "同花" };
   if (straightHigh) return { score: [4, straightHigh], label: "顺子" };
   if (groups[0][1] === 3) return { score: [3, groups[0][0], ...groups.slice(1).map((g) => g[0]).sort((a, b) => b - a)], label: "三条" };
@@ -348,21 +390,36 @@ export function preflopLabel(cards: Card[]): string {
 }
 
 function showdown(state: GameState): GameState {
-  const pot = getPot(state);
+  const committed = getPot(state);
   const levels = [...new Set(state.players.map((player) => player.totalBet).filter(Boolean))].sort((a, b) => a - b);
   const awards = new Map<string, number>();
   const winnerGroups: Winner[] = [];
   let previous = 0;
+  let uncalled = 0;
+
+  const oddChipDistance = (player: Player): number => {
+    const index = state.players.findIndex((candidate) => candidate.id === player.id);
+    const distance = (index - state.dealer + state.players.length) % state.players.length;
+    return distance === 0 ? state.players.length : distance;
+  };
 
   for (const level of levels) {
     const contributors = state.players.filter((player) => player.totalBet >= level);
     const amount = (level - previous) * contributors.length;
     previous = level;
+    if (contributors.length === 1) {
+      const player = contributors[0];
+      awards.set(player.id, (awards.get(player.id) || 0) + amount);
+      uncalled += amount;
+      continue;
+    }
     const eligible = contributors.filter((player) => !player.folded);
     if (!eligible.length || !amount) continue;
     const evaluated = eligible.map((player) => ({ player, hand: evaluateBest([...player.hole, ...state.community]) }));
     const best = evaluated.reduce((top, item) => compareScore(item.hand.score, top.hand.score) > 0 ? item : top);
-    const winners = evaluated.filter((item) => compareScore(item.hand.score, best.hand.score) === 0);
+    const winners = evaluated
+      .filter((item) => compareScore(item.hand.score, best.hand.score) === 0)
+      .sort((a, b) => oddChipDistance(a.player) - oddChipDistance(b.player));
     const share = Math.floor(amount / winners.length);
     let remainder = amount - share * winners.length;
     winners.forEach(({ player }) => {
@@ -373,14 +430,18 @@ function showdown(state: GameState): GameState {
     winnerGroups.push({ ids: winners.map((item) => item.player.id), amount, label: best.hand.label });
   }
 
-  const players = state.players.map((player) => ({ ...player, chips: player.chips + (awards.get(player.id) || 0) }));
+  const players = state.players.map((player) => {
+    const award = awards.get(player.id) || 0;
+    return { ...player, chips: player.chips + award, lastAction: award ? `赢得 ${award}` : player.lastAction };
+  });
   const main = winnerGroups[0];
   const names = main?.ids.map((id) => players.find((player) => player.id === id)?.name).join("、") || "";
   const message = `${names} · ${main?.label || "胜出"}`;
+  const pot = committed - uncalled;
   return addLog({
     ...state, players, phase: "showdown", status: "handOver", currentPlayer: -1,
     winners: winnerGroups, message, lastPot: pot,
-  }, `${message}，赢得 ${pot}`, "strong");
+  }, `${message}，底池 ${pot}${uncalled ? `，退回未被跟注 ${uncalled}` : ""}`, "strong");
 }
 
 function preflopStrength(cards: Card[]): number {
@@ -403,38 +464,152 @@ function handStrength(player: Player, community: Card[]): number {
   return Math.min(1, 0.12 + category * 0.115 + (result.score[1] || 0) / 100);
 }
 
+function inferredRangeFloor(player: Player, difficulty: Difficulty): number {
+  const action = player.lastAction || "";
+  let floor = action.includes("全下") ? 0.52
+    : action.includes("加注") ? 0.43
+      : action.includes("下注") ? 0.34
+        : action.includes("跟注") ? 0.2 : 0;
+  if (difficulty === "relaxed") floor = 0;
+  if (difficulty === "standard") floor *= 0.58;
+  return floor;
+}
+
+function drawRangedHole(pool: Card[], floor: number): { hole: Card[]; remaining: Card[] } {
+  let selected: [number, number] = [0, 1];
+  let bestStrength = -1;
+  const attempts = floor > 0 ? 7 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const first = Math.floor(Math.random() * pool.length);
+    let second = Math.floor(Math.random() * (pool.length - 1));
+    if (second >= first) second += 1;
+    const strength = preflopStrength([pool[first], pool[second]]);
+    if (strength > bestStrength) { bestStrength = strength; selected = [first, second]; }
+    if (strength >= floor) break;
+  }
+  const hole = [pool[selected[0]], pool[selected[1]]];
+  const removed = new Set(selected);
+  return { hole, remaining: pool.filter((_, index) => !removed.has(index)) };
+}
+
+export function estimateEquity(state: GameState, player: Player, simulations = 120): number {
+  const opponents = state.players.filter((candidate) => candidate.id !== player.id && !candidate.folded && candidate.hole.length > 0);
+  if (!opponents.length) return 1;
+  const knownIds = new Set([...player.hole, ...state.community].map((card) => card.id));
+  const unknownDeck = makeDeck().filter((card) => !knownIds.has(card.id));
+  const futureBoardCount = 5 - state.community.length;
+  let points = 0;
+
+  for (let simulation = 0; simulation < simulations; simulation += 1) {
+    let pool = shuffle(unknownDeck);
+    const opponentHands: Card[][] = [];
+    for (const opponent of opponents) {
+      const draw = drawRangedHole(pool, inferredRangeFloor(opponent, state.difficulty));
+      opponentHands.push(draw.hole);
+      pool = draw.remaining;
+    }
+    const board = [...state.community, ...pool.slice(0, futureBoardCount)];
+    const hero = evaluateBest([...player.hole, ...board]);
+    const rivals = opponentHands.map((hole) => evaluateBest([...hole, ...board]));
+    const losses = rivals.filter((hand) => compareScore(hand.score, hero.score) > 0).length;
+    if (losses) continue;
+    const ties = rivals.filter((hand) => compareScore(hand.score, hero.score) === 0).length;
+    points += 1 / (ties + 1);
+  }
+  return points / simulations;
+}
+
+function positionAdjustment(state: GameState, player: Player): number {
+  const index = state.players.findIndex((candidate) => candidate.id === player.id);
+  if (index === state.dealer) return 0.045;
+  const firstToAct = nextSeat(state.players, state.dealer, (candidate) => !candidate.folded && !candidate.allIn);
+  return index === firstToAct ? -0.025 : 0;
+}
+
 export function chooseAiAction(state: GameState, player: Player): GameAction {
   const due = Math.max(0, state.currentBet - player.bet);
   const pot = Math.max(state.bigBlind, getPot(state));
-  const noiseScale = state.difficulty === "relaxed" ? 0.24 : state.difficulty === "sharp" ? 0.08 : 0.15;
+  const simulations = state.difficulty === "relaxed" ? 32 : state.difficulty === "sharp" ? 140 : 72;
+  const equity = estimateEquity(state, player, simulations);
+  const made = handStrength(player, state.community);
+  const equityWeight = state.difficulty === "relaxed" ? 0.48 : state.difficulty === "sharp" ? 0.86 : 0.7;
+  const noiseScale = state.difficulty === "relaxed" ? 0.15 : state.difficulty === "sharp" ? 0.035 : 0.08;
   const noise = (Math.random() - 0.5) * noiseScale;
-  const strength = Math.max(0, Math.min(1, handStrength(player, state.community) + noise));
-  const pressure = due / (pot + due);
+  const strength = Math.max(0, Math.min(1, equity * equityWeight + made * (1 - equityWeight) + positionAdjustment(state, player) + noise));
+  const potOdds = due / (pot + due);
+  const stackToPot = player.chips / Math.max(pot, state.bigBlind);
   const personality = player.aggression;
-  const canRaise = player.chips > due + state.minRaise;
-  const bluff = Math.random() < personality * (state.difficulty === "sharp" ? 0.09 : 0.045);
+  const bounds = legalRaiseBounds(state, player);
+  const canRaise = bounds.max > state.currentBet;
+  const bluff = Math.random() < personality * (state.difficulty === "sharp" ? 0.1 : state.difficulty === "standard" ? 0.055 : 0.035);
 
-  if (due > 0) {
-    if (due >= player.chips) {
-      return strength > 0.68 - personality * 0.12 ? { type: "allIn" } : { type: "fold" };
+  if (state.phase === "preflop") {
+    const activeCount = state.players.filter((candidate) => !candidate.folded && candidate.hole.length > 0).length;
+    const opened = state.currentBet > state.bigBlind;
+    const tableAllowance = Math.min(0.055, Math.max(0, activeCount - 2) * 0.014);
+    const difficultyAdjustment = state.difficulty === "relaxed" ? -0.04 : state.difficulty === "sharp" ? 0.015 : -0.012;
+    const preflopScore = Math.max(0, Math.min(1, made + positionAdjustment(state, player) + personality * 0.04 + noise));
+    const raisePressure = Math.max(0, state.currentBet / state.bigBlind - 1);
+    const continueThreshold = opened
+      ? 0.5 + Math.min(0.15, raisePressure * 0.022) - personality * 0.05 + difficultyAdjustment
+      : 0.5 - tableAllowance - personality * 0.055 + difficultyAdjustment;
+    const raiseThreshold = opened
+      ? 0.94 - personality * 0.06
+      : 0.84 - personality * 0.08 + (state.difficulty === "relaxed" ? 0.025 : 0);
+    const mayRaise = !opened || (state.currentBet <= state.bigBlind * 3 && !player.lastAction.includes("加注"));
+
+    if (due > 0) {
+      if (due >= player.chips) return equity > Math.max(0.34, potOdds + 0.06 - personality * 0.05) ? { type: "allIn" } : { type: "fold" };
+      if (!bluff && preflopScore < continueThreshold) return { type: "fold" };
+      if (canRaise && mayRaise && (preflopScore > raiseThreshold || bluff)) {
+        const baseSize = opened
+          ? state.currentBet + Math.max(state.minRaise, Math.round(pot * (0.48 + personality * 0.18) / 10) * 10)
+          : Math.max(state.currentBet + state.minRaise, state.bigBlind * 3);
+        return { type: "raise", amount: Math.min(player.bet + player.chips, baseSize) };
+      }
+      return { type: "checkCall" };
     }
-    if (!bluff && strength < 0.28 + pressure * 0.55 - personality * 0.08) return { type: "fold" };
-    if (canRaise && (strength > 0.73 - personality * 0.14 || bluff)) {
-      const size = state.currentBet + Math.max(state.minRaise, Math.round(pot * (0.35 + personality * 0.35) / 10) * 10);
+
+    if (canRaise && mayRaise && (preflopScore > raiseThreshold - 0.035 || bluff)) {
+      const size = Math.max(state.currentBet + state.minRaise, state.bigBlind * 3);
       return { type: "raise", amount: Math.min(player.bet + player.chips, size) };
     }
     return { type: "checkCall" };
   }
 
-  if (canRaise && (strength > 0.58 - personality * 0.16 || bluff)) {
-    const size = Math.max(state.bigBlind, Math.round(pot * (0.3 + personality * 0.4) / 10) * 10);
+  if (due > 0) {
+    if (due >= player.chips) {
+      return equity > Math.max(0.36, potOdds + 0.08 - personality * 0.05) ? { type: "allIn" } : { type: "fold" };
+    }
+    const requiredEquity = potOdds + 0.055 - personality * 0.035;
+    if (!bluff && strength < requiredEquity) return { type: "fold" };
+    if (stackToPot < 1.15 && equity > 0.59 - personality * 0.05) return { type: "allIn" };
+    if (canRaise && (strength > 0.67 - personality * 0.11 || bluff)) {
+      const multiplier = 0.42 + personality * 0.34 + Math.max(0, equity - 0.6) * 0.7;
+      const size = state.currentBet + Math.max(state.minRaise, Math.round(pot * multiplier / 10) * 10);
+      return { type: "raise", amount: Math.min(player.bet + player.chips, size) };
+    }
+    return { type: "checkCall" };
+  }
+
+  if (stackToPot < 1 && equity > 0.66) return { type: "allIn" };
+  if (canRaise && (strength > 0.53 - personality * 0.12 || bluff)) {
+    const size = Math.max(state.bigBlind, Math.round(pot * (0.34 + personality * 0.42) / 10) * 10);
     return { type: "raise", amount: Math.min(player.bet + player.chips, size) };
   }
   return { type: "checkCall" };
 }
 
+export function getBlindProgress(state: GameState): { handsRemaining: number | null; nextSmallBlind: number; nextBigBlind: number } {
+  if (state.blindLevel >= BLIND_LEVELS.length) return { handsRemaining: null, nextSmallBlind: state.smallBlind, nextBigBlind: state.bigBlind };
+  const handsRemaining = state.blindLevel * 5 - state.handNo;
+  const [nextSmallBlind, nextBigBlind] = BLIND_LEVELS[state.blindLevel];
+  return { handsRemaining, nextSmallBlind, nextBigBlind };
+}
+
 export function legalRaiseBounds(state: GameState, player: Player): { min: number; max: number } {
-  const max = player.bet + player.chips;
+  const stackTarget = player.bet + player.chips;
+  const max = canPlayerRaise(state, player) ? stackTarget : Math.min(stackTarget, state.currentBet);
   const min = Math.min(max, state.currentBet + state.minRaise);
   return { min, max };
 }
