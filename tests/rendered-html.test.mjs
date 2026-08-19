@@ -25,6 +25,23 @@ test("server-renders the Pocket game shell and sharing metadata", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });
 
+test("local HTTP responses do not upgrade Vite module assets", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("local-security-header-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const env = { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } };
+  const context = { waitUntil() {}, passThroughOnException() {} };
+  const local = await worker.fetch(new Request("http://localhost/"), env, context);
+  const localCsp = local.headers.get("content-security-policy") || "";
+  assert.doesNotMatch(localCsp, /upgrade-insecure-requests/i);
+  assert.equal(local.headers.get("strict-transport-security"), null);
+
+  const secure = await worker.fetch(new Request("https://example.test/"), env, context);
+  const secureCsp = secure.headers.get("content-security-policy") || "";
+  assert.match(secureCsp, /upgrade-insecure-requests/i);
+  assert.match(secure.headers.get("strict-transport-security") || "", /max-age=/i);
+});
+
 test("model configuration endpoint exposes availability without exposing secrets", async () => {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("model-config-test", `${process.pid}-${Date.now()}`);
@@ -67,7 +84,7 @@ test("all five official providers use their documented request shape", async () 
     ["kimi", "KIMI_API_KEY"],
     ["glm", "GLM_API_KEY"],
   ];
-  for (const [, envName] of providers) process.env[envName] = "test-local-key-123456";
+  for (const [, envName] of providers) process.env[envName] = "local-test-token";
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("provider-shape-test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
@@ -144,17 +161,17 @@ test("all five official providers use their documented request shape", async () 
   assert.equal(calls[5].body.reasoning_effort, "high");
   for (const call of calls.filter((call) => !call.body.system)) {
     assert.equal(call.body.stream, false);
-    assert.match(JSON.stringify(call.headers), /Bearer test-local-key-123456/);
+    assert.match(JSON.stringify(call.headers), /Bearer local-test-token/);
   }
   const minimaxCall = calls.find((call) => call.body.system);
-  assert.match(JSON.stringify(minimaxCall.headers), /X-Api-Key.*test-local-key-123456/);
+  assert.match(JSON.stringify(minimaxCall.headers), /X-Api-Key.*local-test-token/);
   assert.match(JSON.stringify(minimaxCall.headers), /anthropic-version.*2023-06-01/);
   assert.match(minimaxCall.url, /\/anthropic\/v1\/messages$/);
 });
 
 test("DeepSeek and MiniMax retry their documented structured-output edge cases", async () => {
-  process.env.DEEPSEEK_API_KEY = "test-local-key-123456";
-  process.env.MINIMAX_API_KEY = "test-local-key-123456";
+  process.env.DEEPSEEK_API_KEY = "local-test-token";
+  process.env.MINIMAX_API_KEY = "local-test-token";
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("provider-retry-test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
@@ -210,7 +227,7 @@ test("DeepSeek and MiniMax retry their documented structured-output edge cases",
 });
 
 test("MiniMax falls back between its official global and mainland China regions", async () => {
-  process.env.MINIMAX_API_KEY = "test-local-key-123456";
+  process.env.MINIMAX_API_KEY = "local-test-token";
   process.env.MINIMAX_API_ENDPOINT = "https://api.minimax.io/anthropic/v1/messages";
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("minimax-region-test", `${process.pid}-${Date.now()}`);

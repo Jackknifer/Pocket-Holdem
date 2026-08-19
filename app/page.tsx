@@ -304,7 +304,9 @@ export default function Home() {
         const configured = options.filter((item) => item.configured);
         setSettings((current) => {
           const selected = options.find((item) => item.id === current.modelProvider && item.configured) || configured[0];
-          return selected ? { ...current, modelProvider: selected.id } : { ...current, modelAiEnabled: false };
+          const hasCustomSetting = typeof window !== "undefined" && localStorage.getItem("pocket-settings") !== null;
+          const shouldEnable = hasCustomSetting ? current.modelAiEnabled : Boolean(selected);
+          return selected ? { ...current, modelProvider: selected.id, modelAiEnabled: shouldEnable } : { ...current, modelAiEnabled: false };
         });
         setModelStatus(configured.length
           ? { tone: "ready", text: `本地已载入 ${configured.length} 个可用模型` }
@@ -869,7 +871,7 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
       : "本地";
   const modelDetail = settings.modelAiEnabled
     ? provider.configured ? `${provider.name} · ${provider.model}` : provider.hint
-    : "当前使用本地策略，可从项目配置启用模型";
+    : provider.configured ? `已就绪 ${provider.name} · ${provider.model}（点击切换）` : "当前使用本地策略，可从项目配置启用模型";
   useEffect(() => {
     if (!modelPanelOpen) return;
     const close = (event: PointerEvent) => {

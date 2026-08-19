@@ -403,6 +403,11 @@ async function requestBotModel(room: RoomRecord, bot: RoomMemberRecord, environm
   if (!room.game || !bot.modelProvider) return null;
   const actor = room.game.players[room.game.currentPlayer];
   if (!actor || actor.id !== bot.id) return null;
+  // Keep the public table clock authoritative while reserving a small server-side
+  // tail for persisting the result (or applying the local fallback) before the
+  // room's deadline expires. Without this buffer, a request that finishes at
+  // exactly 30/120/300 seconds races `currentRoom()` and gets auto-folded first.
+  const modelRequestSeconds = Math.max(5, room.turnTime - 3);
   const request = new Request("https://pocket.internal/api/ai-decision", {
     method: "POST",
     headers: { "content-type": "application/json", "x-pocket-internal": "online-bot" },
@@ -410,7 +415,7 @@ async function requestBotModel(room: RoomRecord, bot: RoomMemberRecord, environm
       provider: bot.modelProvider,
       context: buildModelContext(room.game, actor, room.turnTime, bot.skillId),
       reasoning: room.maxReasoning ? "max" : "standard",
-      actionTimeSeconds: room.turnTime,
+      actionTimeSeconds: modelRequestSeconds,
     }),
   });
   const result = await handleAiDecisionRequest(request, environment);

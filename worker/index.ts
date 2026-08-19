@@ -42,10 +42,18 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
-function withSecurityHeaders(response: Response): Response {
+function withSecurityHeaders(response: Response, requestUrl = "http://localhost/"): Response {
   const headers = new Headers(response.headers);
-  headers.set("strict-transport-security", "max-age=31536000");
-  headers.set("content-security-policy", "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; upgrade-insecure-requests");
+  // Local Vite/Wrangler development runs over plain HTTP. Safari obeys
+  // `upgrade-insecure-requests` for module scripts more strictly than Chrome,
+  // which upgrades `/@id/...entry-browser` to HTTPS and leaves the SSR loading
+  // shell mounted forever. Only send transport-upgrading headers when the
+  // actual request is already HTTPS.
+  const isHttps = new URL(requestUrl).protocol === "https:";
+  if (isHttps) headers.set("strict-transport-security", "max-age=31536000");
+  else headers.delete("strict-transport-security");
+  const csp = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'";
+  headers.set("content-security-policy", isHttps ? `${csp}; upgrade-insecure-requests` : csp);
   headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
   headers.set("referrer-policy", "no-referrer");
   headers.set("x-content-type-options", "nosniff");
@@ -88,7 +96,7 @@ const worker = {
     } else {
       response = await handler.fetch(request, env, ctx);
     }
-    return withSecurityHeaders(response);
+    return withSecurityHeaders(response, request.url);
   },
 };
 
