@@ -12,6 +12,16 @@ export type OnlineMember = {
   isHost: boolean;
 };
 
+export type OnlineChatMessage = {
+  id: string;
+  senderId: string | null;
+  name: string;
+  avatar: string;
+  text: string;
+  createdAt: number;
+  kind: "player" | "system";
+};
+
 export type OnlineRoomSnapshot = {
   roomCode: string;
   status: OnlineRoomStatus;
@@ -23,6 +33,7 @@ export type OnlineRoomSnapshot = {
   deadlineAt: number | null;
   version: number;
   message: string;
+  chat: OnlineChatMessage[];
 };
 
 export type OnlineSession = {
@@ -35,6 +46,7 @@ export type OnlineClientMessage =
   | { type: "ready"; ready: boolean }
   | { type: "start" }
   | { type: "action"; actionId: string; version: number; action: GameAction }
+  | { type: "chat"; messageId: string; text: string }
   | { type: "nextHand" }
   | { type: "sync" }
   | { type: "leave" }
@@ -44,4 +56,3 @@ export type OnlineServerMessage =
   | { type: "snapshot"; snapshot: OnlineRoomSnapshot }
   | { type: "error"; message: string }
   | { type: "pong"; now: number };
-

@@ -5,7 +5,7 @@ import {
   evaluateBest, formatChips, getPot, legalRaiseBounds, phaseLabel, preflopLabel, rankLabel, suitSymbol,
   type Card, type GameAction, type GameState, type Player,
 } from "./game";
-import type { OnlineClientMessage, OnlineRoomSnapshot, OnlineServerMessage, OnlineSession } from "./online";
+import type { OnlineChatMessage, OnlineClientMessage, OnlineRoomSnapshot, OnlineServerMessage, OnlineSession } from "./online";
 
 type TurnTime = 30 | 120 | 300;
 type ConnectionState = "connecting" | "connected" | "reconnecting" | "offline";
@@ -54,6 +54,52 @@ function OnlineSeat({ player, index, game, connected }: { player: Player; index:
   );
 }
 
+function messageTime(createdAt: number): string {
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(createdAt);
+}
+
+function OnlineChat({ messages, viewerId, onSend, onClose }: {
+  messages: OnlineChatMessage[];
+  viewerId: string;
+  onSend: (text: string) => boolean;
+  onClose?: () => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+  }, [messages.length]);
+
+  const submit = () => {
+    const text = draft.trim();
+    if (!text) return;
+    if (onSend(text)) setDraft("");
+  };
+
+  return (
+    <section className="online-chat" aria-label="房间聊天">
+      <header className="online-chat-head"><span><strong>房间聊天</strong><small>仅当前房间可见</small></span>{onClose && <button type="button" onClick={onClose} aria-label="关闭聊天">×</button>}</header>
+      <div className="online-chat-list" ref={listRef} aria-live="polite">
+        {!messages.length && <p className="online-chat-empty">还没有消息，和牌友打个招呼吧。</p>}
+        {messages.map((message) => message.kind === "system" ? (
+          <div className="online-chat-system" key={message.id}><span>{message.text}</span></div>
+        ) : (
+          <article className={message.senderId === viewerId ? "is-me" : ""} key={message.id}>
+            <span className="online-chat-avatar">{message.avatar}</span>
+            <div><small>{message.name} · {messageTime(message.createdAt)}</small><p>{message.text}</p></div>
+          </article>
+        ))}
+      </div>
+      <div className="online-chat-compose">
+        <input value={draft} maxLength={120} placeholder="输入消息…" aria-label="聊天消息" onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }} />
+        <button type="button" disabled={!draft.trim()} onClick={submit}>发送</button>
+      </div>
+    </section>
+  );
+}
+
 async function roomRequest(path: string, body: Record<string, unknown>): Promise<OnlineSession> {
   const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const payload = await response.json().catch(() => ({})) as Partial<OnlineSession> & { error?: string };
@@ -76,6 +122,8 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
   const [showRaise, setShowRaise] = useState(false);
   const [raiseTo, setRaiseTo] = useState(40);
   const [now, setNow] = useState(0);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatSeenCount, setChatSeenCount] = useState<number | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -98,7 +146,10 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
       socket.onmessage = (event) => {
         try {
           const message = JSON.parse(String(event.data)) as OnlineServerMessage;
-          if (message.type === "snapshot") setSnapshot(message.snapshot);
+          if (message.type === "snapshot") {
+            setChatSeenCount((count) => count ?? message.snapshot.chat.length);
+            setSnapshot(message.snapshot);
+          }
           if (message.type === "error") setError(message.message);
         } catch { setError("收到的房间状态无法识别"); }
       };
@@ -139,6 +190,8 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
     socket.send(JSON.stringify(message));
     return true;
   }, []);
+
+  const sendChat = useCallback((text: string) => send({ type: "chat", messageId: crypto.randomUUID(), text }), [send]);
 
   const enter = async (kind: "create" | "join") => {
     const clean = name.trim();
@@ -201,12 +254,15 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
           <section className="online-room-card">
             <header className="online-room-head"><span><small>私人房间</small><strong>{snapshot.roomCode}</strong></span><button onClick={() => void navigator.clipboard?.writeText(snapshot.roomCode)}>复制房间码</button></header>
             <div className="online-room-summary"><span><small>席位</small><b>{snapshot.members.length} / {snapshot.capacity}</b></span><span><small>行动时限</small><b>{snapshot.turnTime} 秒</b></span><span><small>状态</small><b>{snapshot.message}</b></span></div>
-            <div className="online-member-grid" aria-label="房间玩家">
-              {Array.from({ length: snapshot.capacity }, (_, index) => {
-                const member = snapshot.members.find((candidate) => candidate.seat === index);
-                return member ? <article className={member.ready ? "ready" : ""} key={member.id}><span>{member.avatar}</span><div><strong>{member.name}{member.isHost ? " · 房主" : ""}</strong><small>{member.connected ? member.ready ? "已连接 · 已准备" : "已连接 · 未准备" : "连接已断开"}</small></div><i>{member.ready ? "✓" : index + 1}</i></article>
-                  : <article className="empty" key={index}><span>{index + 1}</span><div><strong>等待加入</strong><small>分享上方房间码</small></div></article>;
-              })}
+            <div className="online-room-lower">
+              <div className="online-member-grid" aria-label="房间玩家">
+                {Array.from({ length: snapshot.capacity }, (_, index) => {
+                  const member = snapshot.members.find((candidate) => candidate.seat === index);
+                  return member ? <article className={member.ready ? "ready" : ""} key={member.id}><span>{member.avatar}</span><div><strong>{member.name}{member.isHost ? " · 房主" : ""}</strong><small>{member.connected ? member.ready ? "已连接 · 已准备" : "已连接 · 未准备" : "连接已断开"}</small></div><i>{member.ready ? "✓" : index + 1}</i></article>
+                    : <article className="empty" key={index}><span>{index + 1}</span><div><strong>等待加入</strong><small>分享上方房间码</small></div></article>;
+                })}
+              </div>
+              <OnlineChat messages={snapshot.chat} viewerId={snapshot.viewerId} onSend={sendChat} />
             </div>
             {error && <p className="online-error" role="alert">{error}</p>}
             <footer className="online-room-footer">
@@ -236,14 +292,24 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
     if (!isHumanTurn) return;
     if (send({ type: "action", actionId: crypto.randomUUID(), version: snapshot.version, action })) setShowRaise(false);
   };
+  const closeChat = () => {
+    setChatSeenCount(snapshot.chat.length);
+    setChatOpen(false);
+  };
+  const toggleChat = () => {
+    if (!chatOpen) setChatSeenCount(snapshot.chat.length);
+    setChatOpen((open) => !open);
+  };
+  const unreadChat = chatOpen ? 0 : Math.max(0, snapshot.chat.length - (chatSeenCount ?? snapshot.chat.length));
 
   return (
     <main className="game-shell online-game-shell">
       <header className="topbar">
         <span className="brand"><span className="brand-mark">P</span><span className="brand-word">POCKET</span></span>
         <div className={`round-meta round-turn-status ${isHumanTurn ? "is-you" : ""}`} role="status" aria-live="polite"><span className="round-turn-avatar">{acting?.avatar || "P"}</span><span className="round-turn-copy"><small>房间 {snapshot.roomCode} · 第 {game.handNo} 手 · {phaseLabel(game.phase)} · 剩余 {remaining} 秒</small><strong>{acting ? isHumanTurn ? "轮到你操作" : `轮到 ${acting.name} 操作` : game.message}</strong></span><i className="round-turn-pulse" /></div>
-        <div className="top-actions"><span className={`online-connection-pill ${connection}`}><i />{connection === "connected" ? "联机中" : "重连中"}</span><button className="icon-button online-close-game" onClick={exitRoom} aria-label="返回首页">×</button></div>
+        <div className="top-actions"><span className={`online-connection-pill ${connection}`}><i />{connection === "connected" ? "联机中" : "重连中"}</span><button className="online-chat-toggle" onClick={toggleChat} aria-expanded={chatOpen}>聊天{unreadChat > 0 && <b>{unreadChat}</b>}</button><button className="icon-button online-close-game" onClick={exitRoom} aria-label="返回首页">×</button></div>
       </header>
+      {chatOpen && <aside className="online-chat-drawer"><OnlineChat messages={snapshot.chat} viewerId={snapshot.viewerId} onSend={sendChat} onClose={closeChat} /></aside>}
       <section className="workspace online-game-workspace">
         <section className="table-stage" aria-label="联机德州扑克牌桌">
           <div className="table-grid" />

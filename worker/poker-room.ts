@@ -1,5 +1,5 @@
 import { applyAction, newOnlineSession, startNextHand, type GameAction, type GameState } from "../app/game.ts";
-import type { OnlineMember, OnlineRoomSnapshot, OnlineServerMessage } from "../app/online.ts";
+import type { OnlineChatMessage, OnlineMember, OnlineRoomSnapshot, OnlineServerMessage } from "../app/online.ts";
 
 type TurnTime = 30 | 120 | 300;
 
@@ -24,6 +24,7 @@ type RoomRecord = {
   deadlineAt: number | null;
   version: number;
   message: string;
+  chat: OnlineChatMessage[];
   recentActionIds: string[];
   updatedAt: number;
 };
@@ -33,6 +34,8 @@ type SocketAttachment = {
   token: string;
   windowStartedAt: number;
   messagesInWindow: number;
+  chatWindowStartedAt?: number;
+  chatMessagesInWindow?: number;
 };
 
 const ROOM_KEY = "room";
@@ -43,6 +46,15 @@ function json(data: unknown, status = 200): Response {
 
 function cleanName(value: unknown): string {
   return [...String(value || "")].filter((character) => character.charCodeAt(0) >= 32 && !"<>".includes(character)).join("").trim().slice(0, 12);
+}
+
+function cleanChatText(value: unknown): string {
+  return [...String(value || "")]
+    .filter((character) => character === "\n" || character.charCodeAt(0) >= 32)
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
 }
 
 function cleanAction(value: unknown): GameAction | null {
@@ -108,8 +120,19 @@ export class PokerRoom {
     return {
       roomCode: room.code, status: room.status, capacity: room.capacity, turnTime: room.turnTime, viewerId,
       members, game: room.game ? this.publicGame(room.game, viewerId) : null, deadlineAt: room.deadlineAt,
-      version: room.version, message: room.message,
+      version: room.version, message: room.message, chat: room.chat || [],
     };
+  }
+
+  private addSystemMessage(room: RoomRecord, text: string): void {
+    this.addChatMessage(room, {
+      id: crypto.randomUUID(), senderId: null, name: "牌桌", avatar: "P", text,
+      createdAt: Date.now(), kind: "system",
+    });
+  }
+
+  private addChatMessage(room: RoomRecord, message: OnlineChatMessage): void {
+    room.chat = [...(room.chat || []), message].slice(-80);
   }
 
   private send(socket: WebSocket, message: OnlineServerMessage): void {
@@ -153,8 +176,9 @@ export class PokerRoom {
     const room: RoomRecord = {
       code, status: "lobby", capacity, turnTime, hostId: playerId,
       members: [{ id: playerId, token, name, avatar: name.slice(0, 1).toUpperCase(), seat: 0, ready: false, joinedAt: Date.now() }],
-      game: null, deadlineAt: null, version: 1, message: "等待玩家加入", recentActionIds: [], updatedAt: Date.now(),
+      game: null, deadlineAt: null, version: 1, message: "等待玩家加入", chat: [], recentActionIds: [], updatedAt: Date.now(),
     };
+    this.addSystemMessage(room, `${name} 创建了房间`);
     await this.save(room);
     return json({ roomCode: code, playerId, token });
   }
@@ -176,6 +200,7 @@ export class PokerRoom {
     room.members.push({ id: playerId, token, name, avatar: name.slice(0, 1).toUpperCase(), seat, ready: false, joinedAt: Date.now() });
     room.version += 1;
     room.message = `${name} 加入了房间`;
+    this.addSystemMessage(room, room.message);
     await this.save(room);
     this.broadcast(room);
     return json({ roomCode: room.code, playerId, token });
@@ -191,7 +216,10 @@ export class PokerRoom {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server, [playerId]);
-    server.serializeAttachment({ playerId, token, windowStartedAt: Date.now(), messagesInWindow: 0 } satisfies SocketAttachment);
+    server.serializeAttachment({
+      playerId, token, windowStartedAt: Date.now(), messagesInWindow: 0,
+      chatWindowStartedAt: Date.now(), chatMessagesInWindow: 0,
+    } satisfies SocketAttachment);
     queueMicrotask(() => this.broadcast(room));
     return new Response(null, { status: 101, webSocket: client } as ResponseInit & { webSocket: WebSocket });
   }
@@ -218,6 +246,27 @@ export class PokerRoom {
     if (message.type === "sync") return this.send(socket, { type: "snapshot", snapshot: this.snapshot(room, attachment.playerId) });
 
     const member = room.members.find((candidate) => candidate.id === attachment.playerId)!;
+    if (message.type === "chat") {
+      const text = cleanChatText(message.text);
+      const messageId = String(message.messageId || "").slice(0, 80);
+      if (!text || !messageId) return this.sendError(socket, "请输入聊天内容");
+      if ((room.chat || []).some((item) => item.id === messageId)) return;
+      if (!attachment.chatWindowStartedAt || now - attachment.chatWindowStartedAt > 5_000) {
+        attachment.chatWindowStartedAt = now;
+        attachment.chatMessagesInWindow = 0;
+      }
+      attachment.chatMessagesInWindow = (attachment.chatMessagesInWindow || 0) + 1;
+      socket.serializeAttachment(attachment);
+      if (attachment.chatMessagesInWindow > 5) return this.sendError(socket, "聊天发送得太快了，请稍后再试");
+      this.addChatMessage(room, {
+        id: messageId, senderId: member.id, name: member.name, avatar: member.avatar,
+        text, createdAt: now, kind: "player",
+      });
+      await this.save(room);
+      this.broadcast(room);
+      return;
+    }
+
     if (message.type === "ready" && room.status === "lobby") {
       member.ready = Boolean(message.ready);
       room.version += 1;
@@ -229,6 +278,7 @@ export class PokerRoom {
       room.status = "playing";
       room.version += 1;
       room.message = "牌局开始";
+      this.addSystemMessage(room, "所有玩家已准备，牌局开始");
       Object.assign(room, this.withDeadline(room));
     } else if (message.type === "action") {
       if (!room.game || room.status !== "playing") return this.sendError(socket, "牌局尚未开始");
@@ -251,6 +301,7 @@ export class PokerRoom {
       room.status = room.game.status === "gameOver" ? "finished" : "playing";
       room.version += 1;
       room.message = room.game.message;
+      this.addSystemMessage(room, `第 ${room.game.handNo} 手开始`);
       Object.assign(room, this.withDeadline(room));
     } else if (message.type === "leave" && room.status === "lobby") {
       room.members = room.members.filter((candidate) => candidate.id !== member.id);
@@ -262,6 +313,7 @@ export class PokerRoom {
       if (room.hostId === member.id) room.hostId = room.members[0].id;
       room.version += 1;
       room.message = `${member.name} 离开了房间`;
+      this.addSystemMessage(room, room.message);
       socket.close(1000, "已离开房间");
     } else {
       return this.sendError(socket, "当前不能执行这个操作");
@@ -294,6 +346,7 @@ export class PokerRoom {
     room.game = applyAction(room.game, actor.id, due === 0 ? { type: "checkCall" } : { type: "fold" });
     room.version += 1;
     room.message = `${actor.name} 行动超时，已${due === 0 ? "自动过牌" : "自动弃牌"}`;
+    this.addSystemMessage(room, room.message);
     Object.assign(room, this.withDeadline(room));
     await this.save(room);
     this.broadcast(room);

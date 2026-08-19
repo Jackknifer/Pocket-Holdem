@@ -69,6 +69,15 @@ test("the authoritative room starts only after readiness and isolates each playe
   assert.deepEqual(guestSnapshot.game.players.map((player) => player.hole.length), [2, 0]);
   assert.notEqual(hostSnapshot.viewerId, guestSnapshot.viewerId);
 
+  await room.webSocketMessage(hostSocket, JSON.stringify({ type: "chat", messageId: "message-1", text: "  大家好，开牌吧  " }));
+  const chatSnapshot = guestSocket.messages.filter((message) => message.type === "snapshot").at(-1).snapshot;
+  assert.equal(chatSnapshot.chat.at(-1).text, "大家好，开牌吧");
+  assert.equal(chatSnapshot.chat.at(-1).name, host.name);
+  assert.equal(chatSnapshot.chat.at(-1).kind, "player");
+  const chatCount = (await ctx.storage.get("room")).chat.length;
+  await room.webSocketMessage(hostSocket, JSON.stringify({ type: "chat", messageId: "message-1", text: "重复消息" }));
+  assert.equal((await ctx.storage.get("room")).chat.length, chatCount);
+
   const actor = state.game.players[state.game.currentPlayer];
   const actorSocket = actor.id === host.playerId ? hostSocket : guestSocket;
   const beforeVersion = state.version;
@@ -80,4 +89,3 @@ test("the authoritative room starts only after readiness and isolates each playe
   await room.webSocketMessage(actorSocket, JSON.stringify({ type: "action", actionId: "action-1", version: beforeVersion, action: { type: "checkCall" } }));
   assert.equal((await ctx.storage.get("room")).version, after.version);
 });
-
