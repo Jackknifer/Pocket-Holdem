@@ -7,6 +7,7 @@ import {
   type Card, type GameAction, type GameState, type Player,
 } from "./game";
 import { OPPONENT_SKILLS } from "./ai-skills";
+import { OnlineExperience } from "./online-game";
 
 type Settings = {
   gameMode: GameMode;
@@ -53,7 +54,7 @@ type ModelDecision = {
   reasoningMode?: string;
   reasoningCharacters?: number | null;
 };
-type ModelActionResult = ModelDecision & { action: GameAction; provider: string; model: string; note: string };
+type ModelActionResult = Omit<ModelDecision, "action"> & { action: GameAction; provider: string; model: string; note: string };
 type ModelOption = { id: string; name: string; model: string; configured: boolean; hint: string };
 type ModelAuditEntry = {
   id: string;
@@ -299,7 +300,7 @@ export default function Home() {
   const [game, setGame] = useState<GameState | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [stats, setStats] = useState<Stats>(DEFAULT_STATS);
-  const [timer, setTimer] = useState(DEFAULT_SETTINGS.turnTime);
+  const [timer, setTimer] = useState<number>(DEFAULT_SETTINGS.turnTime);
   const [raiseTo, setRaiseTo] = useState(40);
   const [showRaise, setShowRaise] = useState(false);
   const [panel, setPanel] = useState<"settings" | "help" | "stats" | null>(null);
@@ -311,6 +312,7 @@ export default function Home() {
   const [modelThinkingId, setModelThinkingId] = useState<string | null>(null);
   const [modelStatus, setModelStatus] = useState<ModelStatus>({ tone: "idle", text: "正在读取本地模型配置" });
   const [modelAudit, setModelAudit] = useState<ModelAuditEntry[]>([]);
+  const [onlineOpen, setOnlineOpen] = useState(false);
   const recordedHand = useRef(0);
   const soundedHand = useRef(0);
   const soundedBoard = useRef("");
@@ -327,7 +329,7 @@ export default function Home() {
         if (storedSettings) {
           const parsedSettings = JSON.parse(storedSettings) as Partial<Settings>;
           nextSettings = {
-            gameMode: "local",
+            gameMode: ["local", "online"].includes(String(parsedSettings.gameMode)) ? parsedSettings.gameMode as GameMode : DEFAULT_SETTINGS.gameMode,
             playerCount: [2, 3, 4, 5, 6].includes(Number(parsedSettings.playerCount)) ? parsedSettings.playerCount as PlayerCount : DEFAULT_SETTINGS.playerCount,
             turnTime: [30, 120, 300].includes(Number(parsedSettings.turnTime)) ? parsedSettings.turnTime as TurnTime : DEFAULT_SETTINGS.turnTime,
             modelAiEnabled: Boolean(parsedSettings.modelAiEnabled),
@@ -596,6 +598,11 @@ export default function Home() {
   }, [act, bounds.max, defaultRaise, game, isHumanTurn, panel, showRaise]);
 
   const startSession = () => {
+    if (settings.gameMode === "online") {
+      setOnlineOpen(true);
+      setPanel(null);
+      return;
+    }
     localStorage.removeItem("pocket-active-session");
     setSavedSession(null);
     setModelAudit([]);
@@ -653,6 +660,8 @@ export default function Home() {
   if (!hydrated) {
     return <main className="loading-screen"><span className="brand-mark">P</span><p>正在整理牌桌…</p></main>;
   }
+
+  if (onlineOpen) return <OnlineExperience capacity={settings.playerCount} turnTime={settings.turnTime} onExit={() => setOnlineOpen(false)} />;
 
   if (!game) return <Lobby settings={settings} stats={stats} savedSession={savedSession} modelOptions={modelOptions} modelStatus={modelStatus} testingModel={testingModel} onSelectModel={selectModel} onSetting={updateSetting} onStart={startSession} onResume={resumeSession} />;
 
@@ -947,15 +956,15 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
       <header className="topbar lobby-topbar">
         <span className="brand"><span className="brand-mark">P</span><span className="brand-word">POCKET</span></span>
         <span className="lobby-status"><i /> 对局尚未开始</span>
-        <div className="top-actions"><span className="local-badge">仅在本机运行</span></div>
+        <div className="top-actions"><span className="local-badge">{settings.gameMode === "online" ? "虚拟筹码 · 私人房" : "仅在本机运行"}</span></div>
       </header>
       <section className="lobby-main">
         <div className="lobby-page">
           <div className="lobby-intro">
             <div className="lobby-intro-copy">
-              <span className="modal-kicker">POCKET / 本地牌局</span>
+              <span className="modal-kicker">POCKET / {settings.gameMode === "online" ? "私人联机" : "本地牌局"}</span>
               <h1>安静地，打一手好牌。</h1>
-              <p>确认本场偏好。只有点击开始后，牌局才会正式创建。</p>
+              <p>{settings.gameMode === "online" ? "创建私人房间，或使用六位房间码加入朋友的牌桌。" : "确认本场偏好。只有点击开始后，牌局才会正式创建。"}</p>
             </div>
             <dl className="lobby-basics" aria-label="固定对局信息">
               <div><dt>规则</dt><dd>无限注德州</dd></div>
@@ -973,17 +982,17 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                 <div className="setting-group lobby-control-card">
                   <span className="setting-label">对局模式</span>
                   <div className="segment-control">
-                    <button className="active" onClick={() => onSetting("gameMode", "local")}>本地对局</button>
-                    <button disabled aria-disabled="true">联机对局 <em>即将开放</em></button>
+                    <button className={settings.gameMode === "local" ? "active" : ""} onClick={() => onSetting("gameMode", "local")}>本地对局</button>
+                    <button className={settings.gameMode === "online" ? "active" : ""} onClick={() => { setModelPanelOpen(false); onSetting("gameMode", "online"); }}>联机对局</button>
                   </div>
-                  <small>牌局与记录只保存在本机；联机模式暂不开放。</small>
+                  <small>{settings.gameMode === "online" ? "私人邀请码房，服务端统一发牌和验证行动。" : "牌局与记录只保存在本机。"}</small>
                 </div>
                 <div className="setting-group lobby-control-card lobby-player-count">
                   <span className="setting-label">对局人数</span>
                   <div className="segment-control player-count-control">
                     {([2, 3, 4, 5, 6] as PlayerCount[]).map((value) => <button key={value} className={settings.playerCount === value ? "active" : ""} onClick={() => onSetting("playerCount", value)}>{value} 人</button>)}
                   </div>
-                  <small>你与 {settings.playerCount - 1} 位风格不同的 AI 同桌。</small>
+                  <small>{settings.gameMode === "online" ? `房间最多容纳 ${settings.playerCount} 位真人玩家。` : `你与 ${settings.playerCount - 1} 位风格不同的 AI 同桌。`}</small>
                 </div>
                 <div className="setting-group lobby-control-card">
                   <span className="setting-label">行动时限</span>
@@ -992,7 +1001,16 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                   </div>
                   <small>{settings.turnTime === 30 ? "参考 TDA 叫钟：25 秒行动并在最后 5 秒倒数。" : settings.turnTime === 120 ? "每位玩家统一 120 秒，适合大多数深度思考。" : "每位玩家统一 300 秒，为长时间极致思考保留空间。"}</small>
                 </div>
-                <div className={`lobby-model-picker ${modelPanelOpen ? "is-open" : ""}`} ref={modelPickerRef}>
+                {settings.gameMode === "online" ? (
+                  <div className="lobby-model-card lobby-online-info-card">
+                    <div className="lobby-model-entry">
+                      <span className="lobby-model-symbol">联</span>
+                      <span className="lobby-model-copy"><strong>私人好友房</strong><small>六位房间码 · 游客身份 · 断线可恢复</small></span>
+                      <span className="lobby-model-actions"><em className="model-status ready">可用</em><span className="lobby-model-open">实时</span></span>
+                    </div>
+                    <div className="lobby-model-tools"><span className="lobby-online-security">服务端洗牌 · 隐藏底牌 · 虚拟筹码</span></div>
+                  </div>
+                ) : <div className={`lobby-model-picker ${modelPanelOpen ? "is-open" : ""}`} ref={modelPickerRef}>
                   <div className="lobby-model-card">
                     <button type="button" className="lobby-model-entry" aria-haspopup="listbox" aria-expanded={modelPanelOpen} onClick={() => setModelPanelOpen((value) => !value)}>
                       <span className="lobby-model-symbol">AI</span>
@@ -1023,13 +1041,13 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                       {availableModels.length > 0 && <p className={`lobby-model-popover-status ${modelStatus.tone}`} role="status" aria-live="polite">{testingModel ? "正在验证本地配置与模型响应…" : modelStatus.text}</p>}
                     </div>
                   )}
-                </div>
+                </div>}
               </div>
             </div>
           </section>
           <div className="lobby-footer">
             <div className="lobby-outside-meta">
-              {savedSession && (
+              {settings.gameMode === "local" && savedSession && (
                 <div className="saved-session-card">
                   <span><small>上次对局</small><strong>第 {savedSession.game.handNo} 手牌</strong></span>
                   <span><small>你的筹码</small><strong>{formatChips(savedSession.game.players.find((player) => player.isHuman)?.chips || 0)}</strong></span>
@@ -1037,15 +1055,15 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                 </div>
               )}
               <div className="lobby-selection-line" aria-label="当前选择">
-                <span>当前选择</span><b>本地对局</b><i /><b>{settings.playerCount} 人</b><i /><b>{timeLabel}</b><i /><b>{settings.modelAiEnabled ? provider.name : "本地 AI · 最高强度"}</b>
+                <span>当前选择</span><b>{settings.gameMode === "online" ? "联机对局" : "本地对局"}</b><i /><b>{settings.playerCount} 人</b><i /><b>{timeLabel}</b><i /><b>{settings.gameMode === "online" ? "私人好友房" : settings.modelAiEnabled ? provider.name : "本地 AI · 最高强度"}</b>
               </div>
-              <div className="lobby-history" aria-label="本机历史记录">
+              {settings.gameMode === "local" ? <div className="lobby-history" aria-label="本机历史记录">
                 <span>本机记录</span><b>{stats.hands} 手牌</b><i /><b>{winRate}% 胜率</b><i /><b>最大 {formatChips(stats.biggestPot)}</b>
-              </div>
+              </div> : <div className="lobby-history" aria-label="联机保护"><span>联机保护</span><b>服务端发牌</b><i /><b>行动校验</b><i /><b>断线恢复</b></div>}
             </div>
             <div className="lobby-launch">
-              <button className="primary-button lobby-start" onClick={onStart}>{savedSession ? "开始新对局" : "确认并开始对局"} <span>→</span></button>
-              <p className="start-note">点击后才会洗牌并创建第 1 手牌</p>
+              <button className="primary-button lobby-start" onClick={onStart}>{settings.gameMode === "online" ? "进入联机大厅" : savedSession ? "开始新对局" : "确认并开始对局"} <span>→</span></button>
+              <p className="start-note">{settings.gameMode === "online" ? "进入后创建房间或输入房间码" : "点击后才会洗牌并创建第 1 手牌"}</p>
             </div>
           </div>
         </div>

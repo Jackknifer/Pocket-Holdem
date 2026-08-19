@@ -18,8 +18,8 @@ test("server-renders the Pocket game shell and sharing metadata", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>Pocket — 单机德州扑克<\/title>/i);
-  assert.match(html, /一场安静、专注且足够聪明的单机德州扑克体验/);
+  assert.match(html, /<title>Pocket — 极简德州扑克<\/title>/i);
+  assert.match(html, /一场安静、专注且足够聪明的单机与私人联机德州扑克体验/);
   assert.match(html, /正在整理牌桌/);
   assert.match(html, /http:\/\/localhost(?::3000)?\/og\.png/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
@@ -253,7 +253,7 @@ test("MiniMax falls back between its official global and mainland China regions"
 });
 
 test("ships the complete game instead of starter preview assets", async () => {
-  const [page, engine, css, packageJson, aiRoute, aiSkillsEntry, modelConfig, viteConfig] = await Promise.all([
+  const [page, engine, css, packageJson, aiRoute, aiSkillsEntry, modelConfig, viteConfig, onlineClient, onlineRoom, workerEntry] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/game.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
@@ -262,6 +262,9 @@ test("ships the complete game instead of starter preview assets", async () => {
     readFile(new URL("../app/ai-skills.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/model-config.ts", import.meta.url), "utf8"),
     readFile(new URL("../vite.config.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/online-game.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../worker/poker-room.ts", import.meta.url), "utf8"),
+    readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
   ]);
   const opponentSkillNames = ["mira", "knox", "aria", "theo", "nova"];
   const opponentSkillSources = await Promise.all(opponentSkillNames.map((name) => readFile(new URL(`../app/opponent-skills/${name}.ts`, import.meta.url), "utf8")));
@@ -277,7 +280,8 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(page, /对局模式/);
   assert.match(page, /本地对局/);
   assert.match(page, /联机对局/);
-  assert.match(page, /即将开放/);
+  assert.doesNotMatch(page, /联机对局[^\n]*即将开放/);
+  assert.match(page, /OnlineExperience/);
   assert.doesNotMatch(page, /对手强度/);
   assert.match(page, /行动时限/);
   assert.doesNotMatch(page, /思考节奏/);
@@ -340,6 +344,8 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.doesNotMatch(engine, /AI_DIFFICULTY_PROFILES|decisionLapse|difficulty:/);
   assert.match(engine, /BLIND_LEVELS/);
   assert.match(engine, /basePlayers\(playerCount/);
+  assert.match(engine, /newOnlineSession/);
+  assert.match(engine, /crypto\.getRandomValues/);
   assert.match(engine, /continueThreshold/);
   assert.match(engine, /canPlayerRaise/);
   assert.match(engine, /actedAt/);
@@ -430,5 +436,20 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(viteConfig, /pocket-local-model-api/);
   assert.match(viteConfig, /handleAiDecisionRequest/);
   assert.match(viteConfig, /loadEnv/);
+  assert.match(viteConfig, /POKER_ROOMS/);
+  assert.match(viteConfig, /new_sqlite_classes:\s*\["PokerRoom"\]/);
+  assert.match(workerEntry, /handleOnlineRequest/);
+  assert.match(workerEntry, /crypto\.randomUUID/);
+  assert.match(onlineRoom, /constructor\(ctx:\s*DurableObjectState\)/);
+  assert.match(onlineRoom, /acceptWebSocket/);
+  assert.match(onlineRoom, /setAlarm/);
+  assert.match(onlineRoom, /recentActionIds/);
+  assert.match(onlineRoom, /hole:\s*player\.id === viewerId/);
+  assert.match(onlineRoom, /applyAction\(room\.game, member\.id, action\)/);
+  assert.match(onlineClient, /pocket-online-session/);
+  assert.match(onlineClient, /new WebSocket/);
+  assert.match(onlineClient, /actionId:\s*crypto\.randomUUID/);
+  assert.match(css, /\.online-entry/);
+  assert.match(css, /\.online-room-card/);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
 });

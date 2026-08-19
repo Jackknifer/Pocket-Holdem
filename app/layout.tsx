@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-const title = "Pocket — 单机德州扑克";
-const description = "一场安静、专注且足够聪明的单机德州扑克体验。";
+const title = "Pocket — 极简德州扑克";
+const description = "一场安静、专注且足够聪明的单机与私人联机德州扑克体验。";
 
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();

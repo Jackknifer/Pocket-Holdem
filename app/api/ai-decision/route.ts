@@ -242,7 +242,7 @@ export async function handleAiDecisionRequest(request: Request) {
         let response: Response;
         try {
           requestAttempts += 1;
-          const headers = config.adapter === "minimax"
+          const headers: Record<string, string> = config.adapter === "minimax"
             ? {
                 "X-Api-Key": config.apiKey,
                 "anthropic-version": "2023-06-01",

@@ -6,7 +6,9 @@ import {
   evaluateBest,
   legalRaiseBounds,
   LOCAL_AI_PROFILE,
+  newOnlineSession,
   newSession,
+  startNextHand,
 } from "../app/game.ts";
 
 const card = (rank, suit) => ({ rank, suit, id: `${rank}${suit}` });
@@ -16,6 +18,27 @@ test("the built-in opponent exposes one fixed maximum-strength profile", () => {
   assert.equal(LOCAL_AI_PROFILE.rangeInference, 1);
   assert.ok(LOCAL_AI_PROFILE.equityWeight >= 0.9);
   assert.ok(LOCAL_AI_PROFILE.noiseScale <= 0.02);
+});
+
+test("an online session deals unique private cards and ends only when one stack remains", () => {
+  const game = newOnlineSession([
+    { id: "one", name: "ONE", avatar: "O" },
+    { id: "two", name: "TWO", avatar: "T" },
+    { id: "three", name: "THREE", avatar: "H" },
+  ]);
+  assert.equal(game.tableMode, "online");
+  assert.equal(game.players.length, 3);
+  assert.ok(game.players.every((candidate) => candidate.hole.length === 2));
+  assert.equal(new Set(game.players.flatMap((candidate) => candidate.hole.map((item) => item.id))).size, 6);
+  assert.equal(game.deck.length, 46);
+
+  const finished = startNextHand({
+    ...game,
+    status: "handOver",
+    players: game.players.map((candidate, index) => ({ ...candidate, chips: index === 1 ? 6000 : 0 })),
+  });
+  assert.equal(finished.status, "gameOver");
+  assert.match(finished.message, /TWO 赢下了整场对局/);
 });
 
 function player(id, chips, hole, extra = {}) {

@@ -38,6 +38,7 @@ export interface LogEntry {
 }
 
 export interface GameState {
+  tableMode?: "local" | "online";
   players: Player[];
   deck: Card[];
   community: Card[];
@@ -102,10 +103,22 @@ function makeDeck(): Card[] {
   return SUITS.flatMap((suit) => RANKS.map((rank) => ({ suit, rank, id: `${rank}${suit}` })));
 }
 
+function secureRandomIndex(maxExclusive: number): number {
+  if (maxExclusive <= 1) return 0;
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const range = 0x1_0000_0000;
+    const limit = range - (range % maxExclusive);
+    const value = new Uint32Array(1);
+    do crypto.getRandomValues(value); while (value[0] >= limit);
+    return value[0] % maxExclusive;
+  }
+  return Math.floor(Math.random() * maxExclusive);
+}
+
 function shuffle<T>(items: T[]): T[] {
   const result = [...items];
   for (let i = result.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = secureRandomIndex(i + 1);
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result;
@@ -141,12 +154,39 @@ function basePlayers(playerCount = 4): Player[] {
 export function newSession(playerCount = 4): GameState {
   const players = basePlayers(playerCount);
   const initial: GameState = {
-    players, deck: [], community: [], phase: "preflop", status: "handOver",
-    dealer: Math.floor(Math.random() * players.length), currentPlayer: -1, currentBet: 0, minRaise: 20,
+    tableMode: "local", players, deck: [], community: [], phase: "preflop", status: "handOver",
+    dealer: secureRandomIndex(players.length), currentPlayer: -1, currentBet: 0, minRaise: 20,
     acted: [], actedAt: {}, handNo: 0, smallBlind: 10, bigBlind: 20, blindLevel: 1, winners: [], message: "",
     log: [], lastPot: 0,
   };
   return startNextHand(initial, true);
+}
+
+export type OnlinePlayerSeed = { id: string; name: string; avatar: string };
+
+export function newOnlineSession(seats: OnlinePlayerSeed[]): GameState {
+  const players = seats.slice(0, 6).map((seat) => ({
+    id: seat.id,
+    name: seat.name,
+    chips: 2000,
+    hole: [] as Card[],
+    bet: 0,
+    totalBet: 0,
+    folded: false,
+    allIn: false,
+    isHuman: false,
+    avatar: seat.avatar,
+    note: "在线玩家",
+    aggression: 0.5,
+    lastAction: "",
+  }));
+  if (players.length < 2) throw new Error("联机牌局至少需要两位玩家");
+  return startNextHand({
+    tableMode: "online", players, deck: [], community: [], phase: "preflop", status: "handOver",
+    dealer: secureRandomIndex(players.length), currentPlayer: -1, currentBet: 0, minRaise: 20,
+    acted: [], actedAt: {}, handNo: 0, smallBlind: 10, bigBlind: 20, blindLevel: 1,
+    winners: [], message: "", log: [], lastPot: 0,
+  }, true);
 }
 
 function postBlind(players: Player[], index: number, amount: number, label: string): Player[] {
@@ -160,8 +200,11 @@ function postBlind(players: Player[], index: number, amount: number, label: stri
 export function startNextHand(previous: GameState, first = false): GameState {
   const funded = previous.players.filter((player) => player.chips > 0);
   const human = previous.players.find((player) => player.isHuman);
-  if (!human || human.chips <= 0 || funded.length < 2) {
-    return { ...previous, status: "gameOver", currentPlayer: -1, message: human?.chips ? "你赢下了整场对局" : "本场对局结束" };
+  const onlineFinished = previous.tableMode === "online" && funded.length < 2;
+  const localFinished = previous.tableMode !== "online" && (!human || human.chips <= 0 || funded.length < 2);
+  if (onlineFinished || localFinished) {
+    const champion = funded[0];
+    return { ...previous, status: "gameOver", currentPlayer: -1, message: previous.tableMode === "online" && champion ? `${champion.name} 赢下了整场对局` : human?.chips ? "你赢下了整场对局" : "本场对局结束" };
   }
 
   const deck = shuffle(makeDeck());
