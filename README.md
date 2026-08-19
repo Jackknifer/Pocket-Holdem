@@ -23,14 +23,24 @@ Pocket-Holdem 是一款极简风格的德州扑克网页游戏：暖白、灰色
 
 需要 Node.js 22 或更高版本。
 
+从 GitHub 下载 ZIP 后，先解压，并在终端进入解压出来的项目目录（通常叫 `Pocket-Holdem-main`）。GitHub 不会包含 `node_modules`，所以第一次启动必须先安装依赖：
+
 ```bash
-git clone https://github.com/Jackknifer/Pocket-Holdem.git
-cd Pocket-Holdem
+cd Pocket-Holdem-main
 npm install
 npm run dev
 ```
 
-首次运行时，项目会自动创建根目录下的 `.env.local`。浏览器打开 `http://localhost:3000`，进入大厅后选择“本地对局”或“联机对局”。联机时，把终端显示的 `Network` 地址分享给同一局域网内的其他设备即可。
+如果使用 Git 克隆，则把第一行替换为：
+
+```bash
+git clone https://github.com/Jackknifer/Pocket-Holdem.git
+cd Pocket-Holdem
+```
+
+`npm install` 只需在首次下载后运行一次；如果跳过它，启动时会出现 `env: vinext: No such file or directory`。启动成功后，浏览器打开 `http://localhost:3000`，进入大厅后选择“本地对局”或“联机对局”。联机时，把终端显示的 `Network` 地址分享给同一局域网内的其他设备即可。
+
+首次运行会自动创建根目录下的 `.env.local`。如果终端提示“尚未安装项目依赖”，先运行 `npm install`，再运行 `npm run dev`。
 
 ```bash
 npm run lint

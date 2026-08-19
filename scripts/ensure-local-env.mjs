@@ -11,3 +11,10 @@ if (!existsSync(envPath)) {
   );
   console.log("已创建 .env.local，请填写 API Key 后重启服务。\n");
 }
+
+const vinextBin = join(process.cwd(), "node_modules", ".bin", "vinext");
+
+if (!existsSync(vinextBin)) {
+  console.error("尚未安装项目依赖，请先运行 npm install，再运行 npm run dev。\n");
+  process.exit(1);
+}
