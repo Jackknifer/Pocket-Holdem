@@ -32,10 +32,6 @@ const localBindingConfig = {
         },
       ]
     : [],
-  durable_objects: {
-    bindings: [{ name: "POKER_ROOMS", class_name: "PokerRoom" }],
-  },
-  migrations: [{ tag: "v1", new_sqlite_classes: ["PokerRoom"] }],
 };
 
 function localModelApi(): Plugin {

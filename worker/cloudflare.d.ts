@@ -3,38 +3,21 @@ interface Fetcher {
 }
 
 interface D1Database {
-  readonly __d1Brand?: "D1Database";
+  prepare(query: string): D1PreparedStatement;
+  batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
 }
 
-interface DurableObjectStub extends Fetcher {
-  readonly id?: string;
+interface D1PreparedStatement {
+  bind(...values: unknown[]): D1PreparedStatement;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  run<T = Record<string, unknown>>(): Promise<D1Result<T>>;
+  all<T = Record<string, unknown>>(): Promise<D1Result<T>>;
 }
 
-interface DurableObjectNamespace {
-  getByName(name: string): DurableObjectStub;
-}
-
-interface DurableObjectStorage {
-  get<T = unknown>(key: string): Promise<T | undefined>;
-  put<T>(key: string, value: T): Promise<void>;
-  setAlarm(scheduledTime: number | Date): Promise<void>;
-  deleteAlarm(): Promise<void>;
-  deleteAll(): Promise<void>;
-}
-
-interface DurableObjectState {
-  storage: DurableObjectStorage;
-  acceptWebSocket(socket: WebSocket, tags?: string[]): void;
-  getWebSockets(tag?: string): WebSocket[];
-}
-
-interface WebSocket {
-  serializeAttachment(value: unknown): void;
-  deserializeAttachment(): unknown;
-}
-
-declare class WebSocketPair {
-  [key: number]: WebSocket;
+interface D1Result<T = Record<string, unknown>> {
+  success: boolean;
+  results?: T[];
+  meta: { changes?: number };
 }
 
 declare module "cloudflare:workers" {

@@ -5,7 +5,7 @@ import {
   evaluateBest, formatChips, getPot, legalRaiseBounds, phaseLabel, preflopLabel, rankLabel, suitSymbol,
   type Card, type GameAction, type GameState, type Player,
 } from "./game";
-import type { OnlineChatMessage, OnlineClientMessage, OnlineRoomSnapshot, OnlineServerMessage, OnlineSession } from "./online";
+import type { OnlineChatMessage, OnlineClientMessage, OnlineRoomSnapshot, OnlineSession } from "./online";
 
 type TurnTime = 30 | 120 | 300;
 type ConnectionState = "connecting" | "connected" | "reconnecting" | "offline";
@@ -124,54 +124,42 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
   const [now, setNow] = useState(0);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatSeenCount, setChatSeenCount] = useState<number | null>(null);
-  const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     if (!session) return;
     let disposed = false;
-    let retryTimer: number | undefined;
-    let attempts = 0;
-    const connect = () => {
+    let pollTimer: number | undefined;
+    let failures = 0;
+    const controller = new AbortController();
+    const poll = async () => {
       if (disposed) return;
-      setConnection(attempts ? "reconnecting" : "connecting");
-      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(`${protocol}//${location.host}/api/online/rooms/${session.roomCode}/socket?playerId=${encodeURIComponent(session.playerId)}&token=${encodeURIComponent(session.token)}`);
-      socketRef.current = socket;
-      socket.onopen = () => {
-        attempts = 0;
+      try {
+        const response = await fetch(`/api/online/rooms/${session.roomCode}/snapshot`, {
+          headers: { authorization: `Bearer ${session.token}`, "x-pocket-player-id": session.playerId },
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const payload = await response.json().catch(() => ({})) as { snapshot?: OnlineRoomSnapshot; error?: string };
+        if (!response.ok || !payload.snapshot) throw new Error(payload.error || "房间状态暂时不可用");
+        const recovered = failures > 0;
+        failures = 0;
         setConnection("connected");
-        setError("");
-        socket.send(JSON.stringify({ type: "sync" } satisfies OnlineClientMessage));
-      };
-      socket.onmessage = (event) => {
-        try {
-          const message = JSON.parse(String(event.data)) as OnlineServerMessage;
-          if (message.type === "snapshot") {
-            setChatSeenCount((count) => count ?? message.snapshot.chat.length);
-            setSnapshot(message.snapshot);
-          }
-          if (message.type === "error") setError(message.message);
-        } catch { setError("收到的房间状态无法识别"); }
-      };
-      socket.onclose = () => {
-        if (disposed) return;
-        setConnection("reconnecting");
-        attempts += 1;
-        if (attempts > 6) {
-          setConnection("offline");
-          setError("暂时无法恢复房间连接，请稍后重新进入");
-          return;
-        }
-        retryTimer = window.setTimeout(connect, Math.min(5_000, 900 * attempts));
-      };
-      socket.onerror = () => socket.close();
+        if (recovered) setError("");
+        setChatSeenCount((count) => count ?? payload.snapshot!.chat.length);
+        setSnapshot(payload.snapshot);
+      } catch (reason) {
+        if (disposed || controller.signal.aborted) return;
+        failures += 1;
+        setConnection(failures > 6 ? "offline" : "reconnecting");
+        if (failures > 6) setError(reason instanceof Error ? reason.message : "暂时无法恢复房间连接");
+      }
+      if (!disposed) pollTimer = window.setTimeout(poll, failures ? Math.min(5_000, 700 * failures) : 800);
     };
-    connect();
+    void poll();
     return () => {
       disposed = true;
-      if (retryTimer) window.clearTimeout(retryTimer);
-      socketRef.current?.close();
-      socketRef.current = null;
+      controller.abort();
+      if (pollTimer) window.clearTimeout(pollTimer);
     };
   }, [session]);
 
@@ -182,14 +170,26 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
   }, [snapshot?.deadlineAt]);
 
   const send = useCallback((message: OnlineClientMessage) => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
+    if (!session || connection === "offline") {
       setError("正在恢复连接，请稍后再操作");
       return false;
     }
-    socket.send(JSON.stringify(message));
+    void fetch(`/api/online/rooms/${session.roomCode}/message`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${session.token}`,
+        "x-pocket-player-id": session.playerId,
+      },
+      body: JSON.stringify(message),
+      keepalive: message.type === "leave",
+    }).then(async (response) => {
+      const payload = await response.json().catch(() => ({})) as { snapshot?: OnlineRoomSnapshot; error?: string };
+      if (!response.ok) throw new Error(payload.error || "操作没有成功");
+      if (payload.snapshot) setSnapshot(payload.snapshot);
+    }).catch((reason) => setError(reason instanceof Error ? reason.message : "操作没有成功"));
     return true;
-  }, []);
+  }, [connection, session]);
 
   const sendChat = useCallback((text: string) => send({ type: "chat", messageId: crypto.randomUUID(), text }), [send]);
 

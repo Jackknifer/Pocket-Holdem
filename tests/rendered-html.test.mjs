@@ -263,7 +263,7 @@ test("ships the complete game instead of starter preview assets", async () => {
     readFile(new URL("../app/model-config.ts", import.meta.url), "utf8"),
     readFile(new URL("../vite.config.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/online-game.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../worker/poker-room.ts", import.meta.url), "utf8"),
+    readFile(new URL("../worker/online-room.ts", import.meta.url), "utf8"),
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
   ]);
   const opponentSkillNames = ["mira", "knox", "aria", "theo", "nova"];
@@ -436,18 +436,21 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(viteConfig, /pocket-local-model-api/);
   assert.match(viteConfig, /handleAiDecisionRequest/);
   assert.match(viteConfig, /loadEnv/);
-  assert.match(viteConfig, /POKER_ROOMS/);
-  assert.match(viteConfig, /new_sqlite_classes:\s*\["PokerRoom"\]/);
+  assert.match(viteConfig, /d1_databases/);
+  assert.doesNotMatch(viteConfig, /POKER_ROOMS|new_sqlite_classes/);
   assert.match(workerEntry, /handleOnlineRequest/);
-  assert.match(workerEntry, /crypto\.randomUUID/);
-  assert.match(onlineRoom, /constructor\(ctx:\s*DurableObjectState\)/);
-  assert.match(onlineRoom, /acceptWebSocket/);
-  assert.match(onlineRoom, /setAlarm/);
+  assert.match(workerEntry, /env\.DB/);
+  assert.match(onlineRoom, /CREATE TABLE IF NOT EXISTS online_rooms/);
+  assert.match(onlineRoom, /UPDATE online_rooms SET state = \?, revision = revision \+ 1/);
+  assert.match(onlineRoom, /online_presence/);
+  assert.match(onlineRoom, /applyExpiredTurn/);
   assert.match(onlineRoom, /recentActionIds/);
   assert.match(onlineRoom, /hole:\s*player\.id === viewerId/);
   assert.match(onlineRoom, /applyAction\(room\.game, member\.id, action\)/);
   assert.match(onlineClient, /pocket-online-session/);
-  assert.match(onlineClient, /new WebSocket/);
+  assert.match(onlineClient, /\/snapshot/);
+  assert.match(onlineClient, /\/message/);
+  assert.doesNotMatch(onlineClient, /new WebSocket/);
   assert.match(onlineClient, /actionId:\s*crypto\.randomUUID/);
   assert.match(css, /\.online-entry/);
   assert.match(css, /\.online-room-card/);
