@@ -15,11 +15,13 @@ Pocket-Holdem 是一款极简风格的德州扑克网页游戏：暖白、灰色
 需要 Node.js 22 或更高版本。
 
 ```bash
+git clone https://github.com/Jackknifer/Pocket-Holdem.git
+cd Pocket-Holdem
 npm install
 npm run dev
 ```
 
-浏览器打开 `http://localhost:3000`。进入大厅后选择“本地对局”或“联机对局”。联机时，把终端显示的 `Network` 地址分享给同一局域网内的其他设备即可。
+首次运行时，项目会自动创建根目录下的 `.env.local`。浏览器打开 `http://localhost:3000`，进入大厅后选择“本地对局”或“联机对局”。联机时，把终端显示的 `Network` 地址分享给同一局域网内的其他设备即可。
 
 ```bash
 npm run lint
@@ -30,7 +32,13 @@ npm test
 
 API 配置只保存在本机服务端，不在网页中填写，也不会上传到 GitHub。
 
-首次运行 `npm run dev` 时，项目会自动在根目录创建 `.env.local`。直接打开这个文件，把需要使用的变量填好即可，不需要手动创建。
+按下面步骤配置：
+
+1. 先运行一次 `npm run dev`，让项目自动创建 `.env.local`。
+2. 在项目根目录打开 `.env.local`。macOS 可以运行 `open -e .env.local`；Finder 中按 `Command + Shift + .` 可以显示这个隐藏文件。
+3. 只填写你要使用的模型对应的 `API_KEY`、`MODEL` 和 `API_ENDPOINT`。
+4. 保存文件后，在运行服务的终端按 `Control + C` 停止服务，再重新运行 `npm run dev`。
+5. 回到大厅，打开模型选择器；显示为可用的模型即可作为 AI 对手使用。
 
 例如配置 DeepSeek：
 
@@ -60,7 +68,7 @@ GLM_MODEL=glm-5.2
 GLM_API_ENDPOINT=https://open.bigmodel.cn/api/paas/v4/chat/completions
 ```
 
-保存 `.env.local` 后重启 `npm run dev`。大厅会自动显示已配置且可用的模型；模型名可以直接修改为账号有权限使用的型号，例如 `MiniMax-M3`。API Key 只由本地服务端读取，浏览器不会接收或保存。
+模型名可以直接修改为账号有权限使用的型号，例如 `MiniMax-M3`。如果模型没有显示为可用，请检查 API Key、模型名和接口地址，并确认已重启开发服务。API Key 只由本地服务端读取，浏览器不会接收或保存。
 
 ## 开源安全
 
