@@ -1,13 +1,17 @@
 import { sites } from "@openai/sites-vite-plugin";
+import { existsSync } from "node:fs";
 import vinext from "vinext";
 import { defineConfig, loadEnv, type Plugin } from "vite";
-import hostingConfig from "./.openai/hosting.json";
 import { handleAiDecisionRequest } from "./app/api/ai-decision/route";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
 
-const { d1, r2 } = hostingConfig;
+// Local development uses a conventional D1 binding. Hosted deployments can
+// override these names without requiring a private project metadata file.
+const d1 = process.env.POCKET_D1_BINDING?.trim() || "DB";
+const r2 = process.env.POCKET_R2_BINDING?.trim() || "";
+const hasHostingMetadata = existsSync(".openai/hosting.json");
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
@@ -98,7 +102,7 @@ export default defineConfig(async ({ mode }) => {
     plugins: [
       localModelApi(),
       vinext(),
-      sites(),
+      ...(hasHostingMetadata ? [sites()] : []),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         config: localBindingConfig,
