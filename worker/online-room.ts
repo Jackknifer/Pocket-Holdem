@@ -38,6 +38,7 @@ export type RoomRecord = {
   updatedAt: number;
   maxReasoning?: boolean;
   aiTurn?: AiTurnLease | null;
+  modelCallTimestamps?: number[];
 };
 
 type StoredRoom = { room: RoomRecord; revision: number };
@@ -161,7 +162,26 @@ async function ensureSchema(db: D1Database): Promise<void> {
       last_seen INTEGER NOT NULL,
       PRIMARY KEY (room_code, player_id)
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS online_creation_limits (
+      fingerprint TEXT NOT NULL,
+      window_start INTEGER NOT NULL,
+      room_count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (fingerprint, window_start)
+    )`),
   ]);
+}
+
+async function roomCreationAllowed(db: D1Database, request: Request): Promise<boolean> {
+  const address = request.headers.get("cf-connecting-ip") || "local-preview";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(address));
+  const fingerprint = Array.from(new Uint8Array(digest).slice(0, 12), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const windowStart = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+  await db.prepare(`INSERT INTO online_creation_limits (fingerprint, window_start, room_count) VALUES (?, ?, 1)
+    ON CONFLICT(fingerprint, window_start) DO UPDATE SET room_count = room_count + 1`)
+    .bind(fingerprint, windowStart).run();
+  const row = await db.prepare("SELECT room_count FROM online_creation_limits WHERE fingerprint = ? AND window_start = ?")
+    .bind(fingerprint, windowStart).first<{ room_count: number }>();
+  return Number(row?.room_count || 0) <= 6;
 }
 
 async function loadRoom(db: D1Database, code: string): Promise<StoredRoom | null> {
@@ -244,6 +264,7 @@ async function createRoom(db: D1Database, request: Request): Promise<Response> {
   const modelProvider = /^[a-z0-9_-]{1,64}$/i.test(String(body.modelProvider || "")) ? String(body.modelProvider).toLowerCase() : "";
   const modelName = modelProvider ? MODEL_NAMES[modelProvider] || modelProvider : "本机最高强度";
   if (name.length < 2) throw new RoomRequestError(400, "请输入 2–12 个字符的名字");
+  if (!await roomCreationAllowed(db, request)) throw new RoomRequestError(429, "当前网络创建房间过于频繁，请一小时后再试");
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const code = randomRoomCode();
     const playerId = crypto.randomUUID();
@@ -260,7 +281,7 @@ async function createRoom(db: D1Database, request: Request): Promise<Response> {
       code, status: "lobby", capacity, turnTime, hostId: playerId,
       members: [{ id: playerId, token, name, avatar: name.slice(0, 1).toUpperCase(), seat: 0, ready: false, joinedAt: Date.now() }, ...bots],
       game: null, deadlineAt: null, version: 1, message: "等待玩家加入", chat: [], recentActionIds: [], updatedAt: Date.now(),
-      maxReasoning: Boolean(body.maxReasoning), aiTurn: null,
+      maxReasoning: Boolean(body.maxReasoning), aiTurn: null, modelCallTimestamps: [],
     };
     addSystemMessage(room, `${name} 创建了房间${botCount ? `，已加入 ${botCount} 位 AI 对手` : ""}`);
     const result = await db.prepare("INSERT OR IGNORE INTO online_rooms (code, state, revision, updated_at) VALUES (?, ?, 1, ?)")
@@ -439,12 +460,15 @@ async function resolveAiTurn(db: D1Database, code: string, initial: StoredRoom, 
     const room = structuredClone(stored.room);
     const lease = { ...queued, leaseId: crypto.randomUUID(), startedAt: Date.now() };
     room.aiTurn = lease;
+    const recentModelCalls = (room.modelCallTimestamps || []).filter((timestamp) => timestamp > Date.now() - 3_600_000);
+    const modelAllowed = Boolean(bot.modelProvider) && recentModelCalls.length < 60;
+    room.modelCallTimestamps = modelAllowed ? [...recentModelCalls, Date.now()] : recentModelCalls;
     if (!await writeRoom(db, code, stored.revision, room)) {
       stored = await currentRoom(db, code);
       continue;
     }
     const minimumThinking = new Promise<void>((resolve) => setTimeout(resolve, 1_800 + Math.floor(Math.random() * 1_800)));
-    const modelDecision = requestBotModel(room, bot, environment).catch(() => null);
+    const modelDecision = requestBotModel(room, modelAllowed ? bot : { ...bot, modelProvider: "" }, environment).catch(() => null);
     const [decision] = await Promise.all([modelDecision, minimumThinking]);
     return finishBotTurn(db, code, lease, decision);
   }

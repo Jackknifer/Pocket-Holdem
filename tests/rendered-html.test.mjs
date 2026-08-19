@@ -446,10 +446,12 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(onlineRoom, /CREATE TABLE IF NOT EXISTS online_rooms/);
   assert.match(onlineRoom, /UPDATE online_rooms SET state = \?, revision = revision \+ 1/);
   assert.match(onlineRoom, /online_presence/);
+  assert.match(onlineRoom, /online_creation_limits/);
   assert.match(onlineRoom, /applyExpiredTurn/);
   assert.match(onlineRoom, /resolveAiTurn/);
   assert.match(onlineRoom, /handleAiDecisionRequest/);
   assert.match(onlineRoom, /本机最高强度/);
+  assert.match(onlineRoom, /modelCallTimestamps/);
   assert.match(onlineRoom, /recentActionIds/);
   assert.match(onlineRoom, /hole:\s*player\.id === viewerId/);
   assert.match(onlineRoom, /applyAction\(room\.game, member\.id, action\)/);
