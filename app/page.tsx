@@ -49,6 +49,9 @@ type ModelAuditEntry = {
   finishReason?: string | null;
   usage?: ModelUsage | null;
   output?: string;
+  skillId?: string | null;
+  skillRulesUsed?: string[];
+  skillVerified?: boolean | null;
   reasoningMode?: string;
   reasoningCharacters?: number | null;
   completedAt?: number;
@@ -444,6 +447,9 @@ export default function Home() {
             region: result.region,
             finishReason: result.finishReason,
             usage: result.usage,
+            skillId: result.skillId,
+            skillRulesUsed: result.skillRulesUsed,
+            skillVerified: result.skillVerified,
             reasoningMode: result.reasoningMode,
             reasoningCharacters: result.reasoningCharacters,
             output: result.output,
@@ -736,6 +742,8 @@ export default function Home() {
                         {entry.usage && <span>Token {entry.usage.input} → {entry.usage.output}</span>}
                         {entry.reasoningMode && <span>推理：{["max", "xhigh"].includes(entry.reasoningMode) ? "极致" : entry.reasoningMode === "high" ? "标准" : entry.reasoningMode === "native" ? "模型原生" : entry.reasoningMode === "adaptive" ? "自适应" : entry.reasoningMode === "enabled" ? "已开启" : "模型默认"}</span>}
                         {entry.reasoningCharacters && <span>内部推理 {entry.reasoningCharacters} 字符</span>}
+                        {entry.skillVerified === true && <span>Skill 已核验</span>}
+                        {entry.skillVerified === false && <span>Skill 未核验</span>}
                         {entry.finishReason && <span>结束：{entry.finishReason}</span>}
                         {entry.requestId && <code title={entry.requestId}>ID {entry.requestId}</code>}
                       </div>

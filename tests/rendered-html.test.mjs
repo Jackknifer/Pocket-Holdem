@@ -360,6 +360,8 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(engine, /LOCAL_AI_PROFILE/);
   assert.doesNotMatch(engine, /AI_DIFFICULTY_PROFILES|decisionLapse|difficulty:/);
   assert.match(engine, /BLIND_LEVELS/);
+  assert.match(engine, /dealHoleCards/);
+  assert.match(engine, /first card goes to the first live seat/);
   assert.match(engine, /basePlayers\(playerCount/);
   assert.match(engine, /newOnlineSession/);
   assert.match(engine, /crypto\.getRandomValues/);
@@ -383,6 +385,9 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(aiRoute, /validateConfiguredEndpoint/);
   assert.match(aiRoute, /<think>/);
   assert.match(aiRoute, /role\.skill/);
+  assert.match(aiRoute, /skillSystemBlock/);
+  assert.match(aiRoute, /skillRulesUsed/);
+  assert.match(aiRoute, /skillVerified/);
   assert.match(aiRoute, /skillApplication/);
   assert.match(aiRoute, /assessment/);
   assert.match(aiRoute, /confidence/);
@@ -402,6 +407,9 @@ test("ships the complete game instead of starter preview assets", async () => {
     assert.match(opponentSkillSources[index], new RegExp(`id: "${name}"`));
     assert.ok(opponentSkillSources[index].length > 2_000, `${name} should have a detailed independent skill file`);
     for (const section of ["preflop", "postflop", "sizing", "adaptations", "decisionProtocol", "outputRequirements", "guardrails"]) {
+      assert.match(opponentSkillSources[index], new RegExp(`${section}:`), `${name} should define ${section}`);
+    }
+    for (const section of ["version", "priorityOrder", "decisionMatrix", "failureModes"]) {
       assert.match(opponentSkillSources[index], new RegExp(`${section}:`), `${name} should define ${section}`);
     }
   }

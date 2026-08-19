@@ -35,6 +35,8 @@ type Decision = {
   factors?: unknown;
   alternatives?: unknown;
   skillApplication?: unknown;
+  skillId?: unknown;
+  skillRulesUsed?: unknown;
   strengthApplication?: unknown;
   risk?: unknown;
   confidence?: unknown;
@@ -87,6 +89,62 @@ function readReasoningCharacters(response: ModelResponse | null): number | null 
   return length > 0 ? length : null;
 }
 
+type SkillReceipt = {
+  expectedSkillId: string | null;
+  reportedSkillId: string | null;
+  rulesUsed: string[];
+  verified: boolean | null;
+};
+
+function skillContext(contextText: string): { skill: Record<string, unknown>; execution: Record<string, unknown> } | null {
+  try {
+    const context = JSON.parse(contextText) as {
+      role?: { skill?: unknown };
+      skillExecution?: unknown;
+    };
+    const skill = context.role?.skill;
+    const execution = context.skillExecution;
+    if (!skill || typeof skill !== "object" || !execution || typeof execution !== "object") return null;
+    return { skill: skill as Record<string, unknown>, execution: execution as Record<string, unknown> };
+  } catch {
+    return null;
+  }
+}
+
+function skillSystemBlock(contextText: string): string {
+  const payload = skillContext(contextText);
+  if (!payload) return "本请求没有可核验的专属 skill 包；仍须遵守通用牌局规则和 legalActions。";
+  return [
+    "【专属 skill 包：必须读取并执行】",
+    JSON.stringify({ skill: payload.skill, execution: payload.execution }),
+    "【专属 skill 包结束】",
+  ].join("\n");
+}
+
+function skillReceipt(decision: Decision, contextText: string): SkillReceipt {
+  const payload = skillContext(contextText);
+  const expected = payload?.execution.skillId;
+  const expectedSkillId = typeof expected === "string" ? expected : null;
+  const reportedSkillId = typeof decision.skillId === "string" ? decision.skillId.trim().slice(0, 64) : null;
+  const rulesUsed = Array.isArray(decision.skillRulesUsed)
+    ? decision.skillRulesUsed.filter((item): item is string => typeof item === "string").slice(0, 8).map((item) => item.slice(0, 120))
+    : [];
+  if (!expectedSkillId) return { expectedSkillId: null, reportedSkillId, rulesUsed, verified: null };
+  const application = typeof decision.skillApplication === "string" ? decision.skillApplication.trim() : "";
+  const ruleCorpus = JSON.stringify(payload).toLowerCase();
+  const hasRecognizableRule = rulesUsed.some((rule) => {
+    const normalized = rule.trim().toLowerCase();
+    return ["priorityorder", "activestreetrules", "decisionmatrix", "sizing", "guardrails"].includes(normalized)
+      || (normalized.length >= 6 && ruleCorpus.includes(normalized));
+  });
+  return {
+    expectedSkillId,
+    reportedSkillId,
+    rulesUsed,
+    verified: reportedSkillId?.toLowerCase() === expectedSkillId.toLowerCase() && hasRecognizableRule && application.length >= 12,
+  };
+}
+
 function supportsOpenAiXHigh(model: string): boolean {
   return /codex-max|gpt-5\.(?:[2-9]|[1-9]\d)/i.test(model);
 }
@@ -112,10 +170,13 @@ function readUsage(response: ModelResponse | null): { input: number; output: num
 }
 
 function modelPayload(config: ServerModelConfig, contextText: string, compatibilityRetry = false, requestedReasoning: "standard" | "max" = "max"): Record<string, unknown> {
+  const skillBlock = skillSystemBlock(contextText);
   const system = [
+    skillBlock,
     "你是一名德州扑克对手，只能根据提供的公开牌局信息和自己的底牌决策。",
     "不得假设其他玩家的隐藏底牌。结合位置、筹码、底池赔率、牌力、对手行动和角色性格。",
-    "输入中 role.skill 是该对手必须遵守的完整专属技能。决策前检查其中 identity、preflop 或当前 postflop 街、sizing、adaptations、stackAndTable、decisionProtocol、outputRequirements 与 guardrails；不得只读取 title 或 summary。",
+    "输入中 role.skill 与 skillExecution 是该对手必须遵守的完整专属技能。严格按 skillExecution.applyInOrder 执行；先读 guardrails 与 decisionProtocol，再读 priorityOrder、当前街规则、decisionMatrix、sizing 和 outputChecklist，不得只读取 title 或 summary。",
+    "必须在最终 JSON 中回填 skillId（等于 skillExecution.skillId）、skillRulesUsed（至少列出一条实际采用的规则标识或原文摘要）和 skillApplication（说明该规则如何改变动作）。这三个字段用于核验模型确实使用了专属 skill。",
     "以 objective 为长期目标，选择与当前局面相关的规则。skillApplication 必须明确指出本次实际采用的角色规则及其对动作的影响，不得只复述角色名称。",
     "本游戏没有低难度档。输入中的 competitiveProfile 表示固定最高竞技强度；不得故意犯错，完整考虑范围、组合、阻断牌、位置、SPR、底池赔率和行动线路，以长期期望值最大化。",
     requestedReasoning === "max" ? "本次启用极致思考：在内部尽可能充分验证候选动作、反例和尺度后再回答。" : "本次使用标准思考：保持严谨，但优先在合理延迟内完成决策。",
@@ -123,7 +184,7 @@ function modelPayload(config: ServerModelConfig, contextText: string, compatibil
     "必须从 legalActions 中选择合法动作。raise 时 amount 必须位于 minRaiseTo 与 maxRaiseTo 之间。",
     "在内部充分推理后再作答，但不要在最终 JSON 中输出隐藏思维链或逐步内心推演。最终答案可以简洁；用关键结论证明决策即可，不以最终文字长度代替推理质量。",
     "除 action 的英文枚举值外，所有文本字段必须使用简体中文。",
-    "只返回一个 JSON 对象，不要 Markdown 或额外文字。严格使用：{\"action\":\"fold|checkCall|raise|allIn\",\"amount\":数字或null,\"note\":\"动作摘要\",\"assessment\":\"牌力结论\",\"rangeAnalysis\":\"范围与位置结论\",\"potAnalysis\":\"赔率、SPR与尺度结论\",\"factors\":[\"2至4项关键公开因素\"],\"alternatives\":[{\"action\":\"主要候选动作\",\"reason\":\"未选择原因\"}],\"skillApplication\":\"采用的角色规则\",\"strengthApplication\":\"最高竞技强度的具体体现\",\"risk\":\"主要风险与不确定性\",\"confidence\":0到100的整数}。各分析字段优先使用一到两句完整短句。",
+    "只返回一个 JSON 对象，不要 Markdown 或额外文字。严格使用：{\"action\":\"fold|checkCall|raise|allIn\",\"amount\":数字或null,\"note\":\"动作摘要\",\"assessment\":\"牌力结论\",\"rangeAnalysis\":\"范围与位置结论\",\"potAnalysis\":\"赔率、SPR与尺度结论\",\"factors\":[\"2至4项关键公开因素\"],\"alternatives\":[{\"action\":\"主要候选动作\",\"reason\":\"未选择原因\"}],\"skillId\":\"skillExecution.skillId\",\"skillRulesUsed\":[\"实际使用的规则\"],\"skillApplication\":\"采用的角色规则\",\"strengthApplication\":\"最高竞技强度的具体体现\",\"risk\":\"主要风险与不确定性\",\"confidence\":0到100的整数}。各分析字段优先使用一到两句完整短句。",
   ].join("\n");
 
   if (config.adapter === "minimax") {
@@ -298,6 +359,7 @@ export async function handleAiDecisionRequest(request: Request, environment?: Mo
           return jsonError(reason, 502);
         }
         if (!actionIsValid) return jsonError("模型返回了未知动作", 502);
+        const receipt = skillReceipt(decision, contextText);
 
         const requestId = response.headers.get("x-request-id")
           || response.headers.get("minimax-request-id")
@@ -323,6 +385,9 @@ export async function handleAiDecisionRequest(request: Request, environment?: Mo
                 };
               })
             : [],
+          skillId: receipt.reportedSkillId,
+          skillRulesUsed: receipt.rulesUsed,
+          skillVerified: receipt.verified,
           skillApplication: typeof decision.skillApplication === "string" ? decision.skillApplication.slice(0, 2400) : "",
           strengthApplication: typeof decision.strengthApplication === "string" ? decision.strengthApplication.slice(0, 1600) : "",
           risk: typeof decision.risk === "string" ? decision.risk.slice(0, 2400) : "",

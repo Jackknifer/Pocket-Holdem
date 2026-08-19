@@ -197,6 +197,22 @@ function postBlind(players: Player[], index: number, amount: number, label: stri
   });
 }
 
+function dealHoleCards(deck: Card[], players: Player[], dealer: number): Player[] {
+  // Tournament-style flop dealing: the first card goes to the first live seat
+  // left of the button and the last card of each round goes to the button. In
+  // heads-up play that means BB receives first and BTN/SB receives last.
+  const order = Array.from({ length: players.length }, (_, offset) => (dealer + offset + 1) % players.length)
+    .filter((index) => players[index].chips > 0);
+  let dealt = players;
+  for (let round = 0; round < 2; round += 1) {
+    for (const index of order) {
+      const card = deck.pop();
+      if (card) dealt = dealt.map((player, playerIndex) => playerIndex === index ? { ...player, hole: [...player.hole, card] } : player);
+    }
+  }
+  return dealt;
+}
+
 export function startNextHand(previous: GameState, first = false): GameState {
   const funded = previous.players.filter((player) => player.chips > 0);
   const human = previous.players.find((player) => player.isHuman);
@@ -219,14 +235,7 @@ export function startNextHand(previous: GameState, first = false): GameState {
   const smallIndex = activeCount === 2 ? dealer : nextSeat(players, dealer, (player) => player.chips > 0);
   const bigIndex = nextSeat(players, smallIndex, (player) => player.chips > 0);
 
-  for (let round = 0; round < 2; round += 1) {
-    for (let offset = 1; offset <= players.length; offset += 1) {
-      const index = (dealer + offset) % players.length;
-      if (players[index].chips <= 0) continue;
-      const card = deck.pop();
-      if (card) players[index] = { ...players[index], hole: [...players[index].hole, card] };
-    }
-  }
+  players = dealHoleCards(deck, players, dealer);
 
   players = postBlind(players, smallIndex, smallBlind, "小盲");
   players = postBlind(players, bigIndex, bigBlind, "大盲");
