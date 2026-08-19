@@ -440,10 +440,16 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.doesNotMatch(viteConfig, /POKER_ROOMS|new_sqlite_classes/);
   assert.match(workerEntry, /handleOnlineRequest/);
   assert.match(workerEntry, /env\.DB/);
+  assert.match(workerEntry, /strict-transport-security/);
+  assert.match(workerEntry, /content-security-policy/);
+  assert.match(workerEntry, /x-content-type-options/);
   assert.match(onlineRoom, /CREATE TABLE IF NOT EXISTS online_rooms/);
   assert.match(onlineRoom, /UPDATE online_rooms SET state = \?, revision = revision \+ 1/);
   assert.match(onlineRoom, /online_presence/);
   assert.match(onlineRoom, /applyExpiredTurn/);
+  assert.match(onlineRoom, /resolveAiTurn/);
+  assert.match(onlineRoom, /handleAiDecisionRequest/);
+  assert.match(onlineRoom, /本机最高强度/);
   assert.match(onlineRoom, /recentActionIds/);
   assert.match(onlineRoom, /hole:\s*player\.id === viewerId/);
   assert.match(onlineRoom, /applyAction\(room\.game, member\.id, action\)/);
@@ -452,6 +458,8 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(onlineClient, /\/message/);
   assert.doesNotMatch(onlineClient, /new WebSocket/);
   assert.match(onlineClient, /actionId:\s*crypto\.randomUUID/);
+  assert.match(onlineClient, /AI 对手/);
+  assert.match(onlineClient, /真人与 AI 可同桌/);
   assert.match(css, /\.online-entry/);
   assert.match(css, /\.online-room-card/);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));

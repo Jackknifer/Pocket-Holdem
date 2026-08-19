@@ -1,4 +1,4 @@
-import { getModelConfig, type ModelAdapter, type ServerModelConfig } from "../../model-config";
+import { getModelConfig, type ModelAdapter, type ModelEnvironment, type ServerModelConfig } from "../../model-config.ts";
 
 type DecisionRequest = {
   provider?: string;
@@ -201,7 +201,7 @@ function providerEndpoints(config: ServerModelConfig, configuredEndpoint: URL): 
   return [endpoint, alternate];
 }
 
-export async function handleAiDecisionRequest(request: Request) {
+export async function handleAiDecisionRequest(request: Request, environment?: ModelEnvironment) {
   const startedAt = Date.now();
   let body: DecisionRequest;
   try {
@@ -214,10 +214,10 @@ export async function handleAiDecisionRequest(request: Request) {
   const requestedReasoning = body.reasoning === "standard" ? "standard" : "max";
   const actionTimeSeconds = [30, 120, 300].includes(Number(body.actionTimeSeconds)) ? Number(body.actionTimeSeconds) : null;
   if (!provider) return jsonError("请选择模型", 400);
-  const config = getModelConfig(provider);
-  if (!config) return jsonError("此模型尚未在 .env.local 配置 API Key，请保存文件并重启服务", 400);
+  const config = getModelConfig(provider, environment);
+  if (!config) return jsonError("此模型尚未在本地或站点服务器配置 API Key", 400);
   const endpoint = validateConfiguredEndpoint(config.endpoint);
-  if (!endpoint) return jsonError("本地配置中的 API 地址无效", 500);
+  if (!endpoint) return jsonError("模型配置中的 API 地址无效", 500);
 
   const contextText = JSON.stringify(body.context ?? null);
   if (contextText.length > 18_000) return jsonError("牌局上下文过大", 413);
@@ -349,7 +349,7 @@ export async function handleAiDecisionRequest(request: Request) {
     }
     return jsonError(regionalError || "模型没有返回可执行动作", 502);
   } catch (error) {
-    return jsonError(error instanceof Error && error.name === "AbortError" ? `模型响应超过 ${timeoutMs / 1000} 秒` : "无法连接模型服务，请检查本地 API 地址或网络", 504);
+    return jsonError(error instanceof Error && error.name === "AbortError" ? `模型响应超过 ${timeoutMs / 1000} 秒` : "无法连接模型服务，请检查服务器 API 地址或网络", 504);
   } finally {
     clearTimeout(timeout);
     request.signal.removeEventListener("abort", abortForDisconnectedClient);

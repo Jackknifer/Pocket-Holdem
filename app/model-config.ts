@@ -15,6 +15,8 @@ export type PublicModelConfig = Pick<ServerModelConfig, "id" | "name" | "model">
   hint: string;
 };
 
+export type ModelEnvironment = Record<string, unknown>;
+
 type StandardModelDefinition = Omit<ServerModelConfig, "apiKey" | "endpoint" | "model"> & {
   keyEnv: string;
   endpointEnv: string;
@@ -51,8 +53,8 @@ const STANDARD_MODELS: StandardModelDefinition[] = [
   },
 ];
 
-function clean(value: string | undefined, fallback = ""): string {
-  return value?.trim() || fallback;
+function clean(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
 function safeId(value: unknown): string {
@@ -63,8 +65,8 @@ function isAdapter(value: unknown): value is ModelAdapter {
   return ["openai", "deepseek", "minimax", "kimi", "glm", "generic"].includes(String(value));
 }
 
-function customModels(): ServerModelConfig[] {
-  const raw = process.env.POCKET_CUSTOM_MODELS_JSON?.trim();
+function customModels(environment: ModelEnvironment): ServerModelConfig[] {
+  const raw = clean(environment.POCKET_CUSTOM_MODELS_JSON);
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
@@ -76,7 +78,7 @@ function customModels(): ServerModelConfig[] {
       const model = typeof item.model === "string" ? item.model.trim().slice(0, 200) : "";
       const apiKeyEnv = typeof item.apiKeyEnv === "string" ? item.apiKeyEnv.trim() : "";
       const inlineApiKey = typeof item.apiKey === "string" ? item.apiKey.trim() : "";
-      const apiKey = clean(apiKeyEnv ? process.env[apiKeyEnv] : undefined, inlineApiKey);
+      const apiKey = clean(apiKeyEnv ? environment[apiKeyEnv] : undefined, inlineApiKey);
       const adapter = isAdapter(item.adapter) ? item.adapter : "generic";
       if (!id || !name || !endpoint || !model) return [];
       return [{ id, name, endpoint, model, apiKey, adapter, keyEnv: apiKeyEnv || undefined }];
@@ -86,30 +88,30 @@ function customModels(): ServerModelConfig[] {
   }
 }
 
-export function getServerModelConfigs(): ServerModelConfig[] {
+export function getServerModelConfigs(environment: ModelEnvironment = process.env): ServerModelConfig[] {
   const standard = STANDARD_MODELS.map((definition) => ({
     id: definition.id,
     name: definition.name,
     adapter: definition.adapter,
     keyEnv: definition.keyEnv,
-    apiKey: clean(process.env[definition.keyEnv]),
-    endpoint: clean(process.env[definition.endpointEnv], definition.defaultEndpoint),
-    model: clean(process.env[definition.modelEnv], definition.defaultModel),
+    apiKey: clean(environment[definition.keyEnv]),
+    endpoint: clean(environment[definition.endpointEnv], definition.defaultEndpoint),
+    model: clean(environment[definition.modelEnv], definition.defaultModel),
   }));
   const seen = new Set(standard.map((item) => item.id));
-  return [...standard, ...customModels().filter((item) => !seen.has(item.id))];
+  return [...standard, ...customModels(environment).filter((item) => !seen.has(item.id))];
 }
 
-export function getModelConfig(id: string): ServerModelConfig | undefined {
-  return getServerModelConfigs().find((item) => item.id === id && item.apiKey.length >= 8);
+export function getModelConfig(id: string, environment: ModelEnvironment = process.env): ServerModelConfig | undefined {
+  return getServerModelConfigs(environment).find((item) => item.id === id && item.apiKey.length >= 8);
 }
 
-export function getPublicModelConfigs(): PublicModelConfig[] {
-  return getServerModelConfigs().map(({ id, name, model, apiKey, keyEnv }) => ({
+export function getPublicModelConfigs(environment: ModelEnvironment = process.env): PublicModelConfig[] {
+  return getServerModelConfigs(environment).map(({ id, name, model, apiKey, keyEnv }) => ({
     id,
     name,
     model,
     configured: apiKey.length >= 8,
-    hint: apiKey.length >= 8 ? "已从本地配置载入" : `在 .env.local 设置 ${keyEnv || "对应的 API Key"}`,
+    hint: apiKey.length >= 8 ? "已从服务器安全配置载入" : `在 .env.local 或站点服务器设置 ${keyEnv || "对应的 API Key"}`,
   }));
 }

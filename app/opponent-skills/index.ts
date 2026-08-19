@@ -1,9 +1,9 @@
-import { ariaSkill } from "./aria";
-import { knoxSkill } from "./knox";
-import { miraSkill } from "./mira";
-import { novaSkill } from "./nova";
-import { theoSkill } from "./theo";
-import type { OpponentSkill } from "./types";
+import { ariaSkill } from "./aria.ts";
+import { knoxSkill } from "./knox.ts";
+import { miraSkill } from "./mira.ts";
+import { novaSkill } from "./nova.ts";
+import { theoSkill } from "./theo.ts";
+import type { OpponentSkill } from "./types.ts";
 
 export type { OpponentSkill } from "./types";
 

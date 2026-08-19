@@ -41,3 +41,24 @@ test("the authoritative room starts only after readiness and isolates each playe
   assert.throws(() => applyMessage(room, actorMember, { type: "action", actionId: "action-1", version: beforeVersion, action: { type: "checkCall" } }), /状态已更新/);
   assert.equal(room.version, duplicateVersion);
 });
+
+test("a ready AI seat can share an authoritative room with a human", () => {
+  const host = { id: "host", token: "h".repeat(64), name: "房主", avatar: "房", seat: 0, ready: false, joinedAt: Date.now() };
+  const bot = {
+    id: "bot-mira", token: "b".repeat(64), name: "Mira", avatar: "M", seat: 1, ready: true, joinedAt: Date.now(),
+    isBot: true, modelProvider: "deepseek", modelName: "DeepSeek", skillId: "mira",
+  };
+  let room = {
+    code: "BOT234", status: "lobby", capacity: 2, turnTime: 30, hostId: host.id,
+    members: [host, bot], game: null, deadlineAt: null, version: 1, message: "等待玩家加入",
+    chat: [], recentActionIds: [], updatedAt: Date.now(), maxReasoning: true, aiTurn: null,
+  };
+
+  room = applyMessage(room, host, { type: "ready", ready: true }).room;
+  room = applyMessage(room, host, { type: "start" }).room;
+  const modelPlayer = room.game.players.find((player) => player.id === bot.id);
+  assert.equal(room.status, "playing");
+  assert.match(modelPlayer.note, /范围|位置/);
+  assert.notEqual(modelPlayer.aggression, 0.5);
+  assert.deepEqual(publicGame(room.game, host.id).players.map((player) => player.hole.length), [2, 0]);
+});

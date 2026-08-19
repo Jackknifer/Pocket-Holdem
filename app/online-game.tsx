@@ -9,6 +9,7 @@ import type { OnlineChatMessage, OnlineClientMessage, OnlineRoomSnapshot, Online
 
 type TurnTime = 30 | 120 | 300;
 type ConnectionState = "connecting" | "connected" | "reconnecting" | "offline";
+export type OnlineModelOption = { id: string; name: string; model: string; configured: boolean };
 
 const SESSION_KEY = "pocket-online-session";
 const NAME_KEY = "pocket-online-name";
@@ -34,7 +35,7 @@ const SEATS: Record<number, SeatPlacement[]> = {
   6: [{ x: 50, y: 91, side: "bottom" }, { x: 13, y: 64, side: "left" }, { x: 17, y: 23, side: "left" }, { x: 50, y: 9, side: "top" }, { x: 83, y: 23, side: "right" }, { x: 87, y: 64, side: "right" }],
 };
 
-function OnlineSeat({ player, index, game, connected }: { player: Player; index: number; game: GameState; connected: boolean }) {
+function OnlineSeat({ player, index, game, connected, modelThinking }: { player: Player; index: number; game: GameState; connected: boolean; modelThinking: boolean }) {
   const active = game.status === "playing" && game.currentPlayer === index;
   const winner = game.winners.some((group) => group.ids.includes(player.id));
   const placement = SEATS[game.players.length]?.[index] || SEATS[4][index];
@@ -42,7 +43,7 @@ function OnlineSeat({ player, index, game, connected }: { player: Player; index:
   return (
     <div className={`seat ${player.isHuman ? "seat-you" : `seat-online-${index}`} seat-side-${placement.side} ${active ? "seat-active" : ""} ${player.folded ? "seat-folded" : ""} ${winner ? "seat-winner" : ""}`} style={{ "--seat-x": `${placement.x}%`, "--seat-y": `${placement.y}%` } as React.CSSProperties}>
       {!player.isHuman && <div className="opponent-cards" aria-label={`${player.name} 的手牌`}><OnlineCard card={player.hole[0]} hidden={!player.hole[0]} small /><OnlineCard card={player.hole[1]} hidden={!player.hole[1]} small /></div>}
-      {active && <span className={`seat-turn-label ${player.isHuman ? "is-you" : ""}`}>{player.isHuman ? "你的回合" : "正在行动"}</span>}
+      {active && <span className={`seat-turn-label ${player.isHuman ? "is-you" : ""}`}>{player.isHuman ? "你的回合" : modelThinking ? "模型思考中" : "正在行动"}</span>}
       <div className="seat-profile">
         <span className="seat-avatar">{player.avatar}</span>
         <span className="seat-copy"><strong>{player.name}{index === game.dealer && <em className="dealer-dot">D</em>}</strong><small>{state || "等待行动"}</small></span>
@@ -107,7 +108,14 @@ async function roomRequest(path: string, body: Record<string, unknown>): Promise
   return { roomCode: payload.roomCode, playerId: payload.playerId, token: payload.token };
 }
 
-export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: number; turnTime: TurnTime; onExit: () => void }) {
+export function OnlineExperience({ capacity, turnTime, modelOptions, selectedModel, maxReasoning, onExit }: {
+  capacity: number;
+  turnTime: TurnTime;
+  modelOptions: OnlineModelOption[];
+  selectedModel: string;
+  maxReasoning: boolean;
+  onExit: () => void;
+}) {
   const [name, setName] = useState(() => typeof window === "undefined" ? "" : localStorage.getItem(NAME_KEY) || "");
   const [joinCode, setJoinCode] = useState("");
   const [session, setSession] = useState<OnlineSession | null>(() => {
@@ -124,6 +132,9 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
   const [now, setNow] = useState(0);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatSeenCount, setChatSeenCount] = useState<number | null>(null);
+  const [botCount, setBotCount] = useState(Math.min(1, capacity - 1));
+  const configuredModels = modelOptions.filter((option) => option.configured);
+  const [botModel, setBotModel] = useState(() => configuredModels.some((option) => option.id === selectedModel) ? selectedModel : configuredModels[0]?.id || "");
 
   useEffect(() => {
     if (!session) return;
@@ -200,7 +211,9 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
     setBusy(true); setError("");
     try {
       const next = kind === "create"
-        ? await roomRequest("/api/online/rooms", { name: clean, capacity, turnTime })
+        ? await roomRequest("/api/online/rooms", {
+            name: clean, capacity, turnTime, botCount, modelProvider: botModel, maxReasoning,
+          })
         : await roomRequest(`/api/online/rooms/${joinCode}/join`, { name: clean });
       localStorage.setItem(NAME_KEY, clean);
       sessionStorage.setItem(SESSION_KEY, JSON.stringify(next));
@@ -228,6 +241,13 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
           <section className="online-entry-card" aria-labelledby="online-entry-title">
             <div className="online-entry-head"><span><strong id="online-entry-title">进入私人牌桌</strong><small>{capacity} 人桌 · 每次行动最多 {turnTime} 秒</small></span><em>实时</em></div>
             <label className="online-field"><span>你的名字</span><input value={name} maxLength={12} autoComplete="nickname" placeholder="输入 2–12 个字符" onChange={(event) => setName(event.target.value)} /></label>
+            <div className="online-ai-setup">
+              <div className="online-ai-heading"><span><strong>AI 对手</strong><small>真人与 AI 可同桌</small></span><b>{botCount} 席</b></div>
+              <div className="online-ai-count" aria-label="AI 席位数量">
+                {Array.from({ length: capacity }, (_, count) => <button type="button" className={botCount === count ? "selected" : ""} key={count} onClick={() => setBotCount(count)}>{count}</button>)}
+              </div>
+              {botCount > 0 && <label className="online-model-select"><span>决策模型</span><select value={botModel} onChange={(event) => setBotModel(event.target.value)}><option value="">本机最高强度</option>{configuredModels.map((option) => <option value={option.id} key={option.id}>{option.name} · {option.model}</option>)}</select><small>{botModel ? `${maxReasoning ? "极致" : "标准"}思考 · 密钥仅在服务器使用` : "模型不可用时也会自动采用本机最高强度"}</small></label>}
+            </div>
             <div className="online-room-actions">
               <button className="primary-button" disabled={busy} onClick={() => void enter("create")}>创建房间 <span>→</span></button>
               <div className="online-join-row"><input aria-label="六位房间码" value={joinCode} maxLength={6} placeholder="六位房间码" onChange={(event) => setJoinCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ""))} /><button disabled={busy} onClick={() => void enter("join")}>加入</button></div>
@@ -258,7 +278,7 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
               <div className="online-member-grid" aria-label="房间玩家">
                 {Array.from({ length: snapshot.capacity }, (_, index) => {
                   const member = snapshot.members.find((candidate) => candidate.seat === index);
-                  return member ? <article className={member.ready ? "ready" : ""} key={member.id}><span>{member.avatar}</span><div><strong>{member.name}{member.isHost ? " · 房主" : ""}</strong><small>{member.connected ? member.ready ? "已连接 · 已准备" : "已连接 · 未准备" : "连接已断开"}</small></div><i>{member.ready ? "✓" : index + 1}</i></article>
+                  return member ? <article className={`${member.ready ? "ready" : ""} ${member.isBot ? "is-bot" : ""}`} key={member.id}><span>{member.avatar}</span><div><strong>{member.name}{member.isHost ? " · 房主" : member.isBot ? " · AI" : ""}</strong><small>{member.isBot ? `${member.modelName || "本机最高强度"} · 已准备` : member.connected ? member.ready ? "已连接 · 已准备" : "已连接 · 未准备" : "连接已断开"}</small></div><i>{member.ready ? "✓" : index + 1}</i></article>
                     : <article className="empty" key={index}><span>{index + 1}</span><div><strong>等待加入</strong><small>分享上方房间码</small></div></article>;
                 })}
               </div>
@@ -313,7 +333,7 @@ export function OnlineExperience({ capacity, turnTime, onExit }: { capacity: num
       <section className="workspace online-game-workspace">
         <section className="table-stage" aria-label="联机德州扑克牌桌">
           <div className="table-grid" />
-          {game.players.map((player, index) => <OnlineSeat key={player.id} player={player} index={index} game={game} connected={memberConnections.get(player.id) ?? false} />)}
+          {game.players.map((player, index) => <OnlineSeat key={player.id} player={player} index={index} game={game} connected={memberConnections.get(player.id) ?? false} modelThinking={snapshot.aiThinking?.playerId === player.id} />)}
           <div className="board"><div className="pot-line"><span>当前底池</span><strong>{formatChips(pot || game.lastPot)}</strong></div><div className="community-cards" aria-label="公共牌">{Array.from({ length: 5 }, (_, index) => <OnlineCard key={index} card={game.community[index]} />)}</div><span className="phase-pill">{phaseLabel(game.phase)}</span><div className="board-bets"><small>本轮投入</small>{game.players.filter((player) => player.bet > 0).map((player) => <span key={player.id}><i>{player.avatar}</i>{formatChips(player.bet)}</span>)}</div></div>
           <div className="hero-hand"><div className="hero-cards"><OnlineCard card={human.hole[0]} /><OnlineCard card={human.hole[1]} /></div><div className="hand-readout"><small>当前牌型</small><strong>{handLabel}</strong></div></div>
           {game.status === "handOver" && <div className="result-card"><span className="result-kicker">本手结束</span><h2>{game.message}</h2><p>底池 {formatChips(game.lastPot)}</p>{me.isHost ? <button className="primary-button" onClick={() => send({ type: "nextHand" })}>下一手牌 <span>→</span></button> : <small>等待房主开始下一手</small>}</div>}

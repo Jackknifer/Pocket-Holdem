@@ -1,5 +1,8 @@
-import { applyAction, newOnlineSession, startNextHand, type GameAction, type GameState } from "../app/game.ts";
+import { applyAction, chooseAiAction, newOnlineSession, startNextHand, type GameAction, type GameState } from "../app/game.ts";
 import type { OnlineChatMessage, OnlineMember, OnlineRoomSnapshot } from "../app/online.ts";
+import { handleAiDecisionRequest } from "../app/api/ai-decision/route.ts";
+import { buildModelContext, normalizeModelAction, type ModelDecision } from "../app/model-poker.ts";
+import type { ModelEnvironment } from "../app/model-config.ts";
 
 type TurnTime = 30 | 120 | 300;
 
@@ -11,7 +14,13 @@ export type RoomMemberRecord = {
   seat: number;
   ready: boolean;
   joinedAt: number;
+  isBot?: boolean;
+  modelProvider?: string;
+  modelName?: string;
+  skillId?: string;
 };
+
+type AiTurnLease = { playerId: string; gameVersion: number; leaseId: string; startedAt: number };
 
 export type RoomRecord = {
   code: string;
@@ -27,6 +36,8 @@ export type RoomRecord = {
   chat: OnlineChatMessage[];
   recentActionIds: string[];
   updatedAt: number;
+  maxReasoning?: boolean;
+  aiTurn?: AiTurnLease | null;
 };
 
 type StoredRoom = { room: RoomRecord; revision: number };
@@ -34,6 +45,14 @@ type MessageBody = Record<string, unknown>;
 
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
+const BOT_PROFILES = [
+  { name: "Mira", avatar: "M", skillId: "mira", note: "范围纪律严谨，重视位置与底池控制", aggression: 0.48 },
+  { name: "Knox", avatar: "K", skillId: "knox", note: "平衡进攻，善于施压与价值下注", aggression: 0.62 },
+  { name: "Aria", avatar: "A", skillId: "aria", note: "观察敏锐，擅长根据牌桌动态调整", aggression: 0.56 },
+  { name: "Theo", avatar: "T", skillId: "theo", note: "稳健克制，重视赔率和摊牌价值", aggression: 0.42 },
+  { name: "Nova", avatar: "N", skillId: "nova", note: "主动灵活，善用阻断牌与下注尺度", aggression: 0.68 },
+] as const;
+const MODEL_NAMES: Record<string, string> = { openai: "OpenAI", deepseek: "DeepSeek", minimax: "MiniMax", kimi: "Kimi", glm: "GLM" };
 
 class RoomRequestError extends Error {
   readonly status: number;
@@ -103,6 +122,7 @@ function applyExpiredTurn(room: RoomRecord): RoomRecord {
   if (!actor) return room;
   const due = Math.max(0, room.game.currentBet - actor.bet);
   room.game = applyAction(room.game, actor.id, due === 0 ? { type: "checkCall" } : { type: "fold" });
+  room.aiTurn = null;
   room.version += 1;
   room.message = `${actor.name} 行动超时，已${due === 0 ? "自动过牌" : "自动弃牌"}`;
   addSystemMessage(room, room.message);
@@ -186,12 +206,18 @@ async function snapshot(db: D1Database, room: RoomRecord, viewerId: string): Pro
   const connected = await connectedIds(db, room.code);
   const members: OnlineMember[] = room.members.map((member) => ({
     id: member.id, name: member.name, avatar: member.avatar, seat: member.seat, ready: member.ready,
-    connected: connected.has(member.id), isHost: member.id === room.hostId,
+    connected: Boolean(member.isBot) || connected.has(member.id), isHost: member.id === room.hostId,
+    isBot: Boolean(member.isBot), modelName: member.modelName,
   }));
   return {
     roomCode: room.code, status: room.status, capacity: room.capacity, turnTime: room.turnTime, viewerId,
     members, game: room.game ? publicGame(room.game, viewerId) : null, deadlineAt: room.deadlineAt,
     version: room.version, message: room.message, chat: room.chat || [],
+    aiThinking: room.aiTurn ? {
+      playerId: room.aiTurn.playerId,
+      modelName: room.members.find((member) => member.id === room.aiTurn?.playerId)?.modelName || "本机最高强度",
+      startedAt: room.aiTurn.startedAt || room.updatedAt,
+    } : null,
   };
 }
 
@@ -214,17 +240,29 @@ async function createRoom(db: D1Database, request: Request): Promise<Response> {
   const name = cleanName(body.name);
   const capacity = Math.max(2, Math.min(6, Number(body.capacity) || 4));
   const turnTime = [30, 120, 300].includes(Number(body.turnTime)) ? Number(body.turnTime) as TurnTime : 120;
+  const botCount = Math.max(0, Math.min(capacity - 1, Math.round(Number(body.botCount) || 0)));
+  const modelProvider = /^[a-z0-9_-]{1,64}$/i.test(String(body.modelProvider || "")) ? String(body.modelProvider).toLowerCase() : "";
+  const modelName = modelProvider ? MODEL_NAMES[modelProvider] || modelProvider : "本机最高强度";
   if (name.length < 2) throw new RoomRequestError(400, "请输入 2–12 个字符的名字");
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const code = randomRoomCode();
     const playerId = crypto.randomUUID();
     const token = randomToken();
+    const bots: RoomMemberRecord[] = Array.from({ length: botCount }, (_, index) => {
+      const profile = BOT_PROFILES[index % BOT_PROFILES.length];
+      return {
+        id: `bot-${crypto.randomUUID()}`, token: randomToken(), name: profile.name, avatar: profile.avatar,
+        seat: capacity - botCount + index, ready: true, joinedAt: Date.now() + index,
+        isBot: true, modelProvider, modelName, skillId: profile.skillId,
+      };
+    });
     const room: RoomRecord = {
       code, status: "lobby", capacity, turnTime, hostId: playerId,
-      members: [{ id: playerId, token, name, avatar: name.slice(0, 1).toUpperCase(), seat: 0, ready: false, joinedAt: Date.now() }],
+      members: [{ id: playerId, token, name, avatar: name.slice(0, 1).toUpperCase(), seat: 0, ready: false, joinedAt: Date.now() }, ...bots],
       game: null, deadlineAt: null, version: 1, message: "等待玩家加入", chat: [], recentActionIds: [], updatedAt: Date.now(),
+      maxReasoning: Boolean(body.maxReasoning), aiTurn: null,
     };
-    addSystemMessage(room, `${name} 创建了房间`);
+    addSystemMessage(room, `${name} 创建了房间${botCount ? `，已加入 ${botCount} 位 AI 对手` : ""}`);
     const result = await db.prepare("INSERT OR IGNORE INTO online_rooms (code, state, revision, updated_at) VALUES (?, ?, 1, ?)")
       .bind(code, JSON.stringify(room), room.updatedAt).run();
     if (Number(result.meta.changes || 0) === 1) {
@@ -271,6 +309,11 @@ export function applyMessage(room: RoomRecord, member: RoomMemberRecord, message
     if (room.hostId !== member.id) throw new RoomRequestError(403, "只有房主可以开始牌局");
     if (room.status !== "lobby" || room.members.length < 2 || room.members.some((candidate) => !candidate.ready)) throw new RoomRequestError(409, "至少两人且所有玩家准备后才能开始");
     room.game = newOnlineSession([...room.members].sort((a, b) => a.seat - b.seat).map((candidate) => ({ id: candidate.id, name: candidate.name, avatar: candidate.avatar })));
+    room.game.players = room.game.players.map((player) => {
+      const bot = room.members.find((candidate) => candidate.id === player.id && candidate.isBot);
+      const profile = BOT_PROFILES.find((candidate) => candidate.skillId === bot?.skillId);
+      return bot && profile ? { ...player, note: profile.note, aggression: profile.aggression } : player;
+    });
     room.status = "playing";
     room.version += 1;
     room.message = "牌局开始";
@@ -286,6 +329,7 @@ export function applyMessage(room: RoomRecord, member: RoomMemberRecord, message
     const action = cleanAction(message.action);
     if (!action) throw new RoomRequestError(400, "这个操作不合法");
     room.game = applyAction(room.game, member.id, action);
+    room.aiTurn = null;
     room.recentActionIds = [...room.recentActionIds, actionId].slice(-80);
     room.version += 1;
     room.message = room.game.message;
@@ -301,6 +345,7 @@ export function applyMessage(room: RoomRecord, member: RoomMemberRecord, message
     if (room.hostId !== member.id) throw new RoomRequestError(403, "只有房主可以开始下一手");
     if (!room.game || room.game.status !== "handOver") throw new RoomRequestError(409, "当前不能开始下一手");
     room.game = startNextHand(room.game);
+    room.aiTurn = null;
     room.status = room.game.status === "gameOver" ? "finished" : "playing";
     room.version += 1;
     room.message = room.game.message;
@@ -308,8 +353,9 @@ export function applyMessage(room: RoomRecord, member: RoomMemberRecord, message
     room = withDeadline(room);
   } else if (message.type === "leave" && room.status === "lobby") {
     room.members = room.members.filter((candidate) => candidate.id !== member.id);
-    if (!room.members.length) return { room, deleted: true };
-    if (room.hostId === member.id) room.hostId = room.members[0].id;
+    const remainingHumans = room.members.filter((candidate) => !candidate.isBot);
+    if (!remainingHumans.length) return { room, deleted: true };
+    if (room.hostId === member.id) room.hostId = remainingHumans[0].id;
     room.version += 1;
     room.message = `${member.name} 离开了房间`;
     addSystemMessage(room, room.message);
@@ -317,6 +363,92 @@ export function applyMessage(room: RoomRecord, member: RoomMemberRecord, message
     throw new RoomRequestError(409, "当前不能执行这个操作");
   }
   return { room };
+}
+
+function activeBot(room: RoomRecord): RoomMemberRecord | null {
+  if (!room.game || room.game.status !== "playing" || room.game.currentPlayer < 0) return null;
+  const actor = room.game.players[room.game.currentPlayer];
+  return room.members.find((member) => member.id === actor?.id && member.isBot) || null;
+}
+
+function actionText(action: GameAction): string {
+  if (action.type === "fold") return "弃牌";
+  if (action.type === "checkCall") return "过牌或跟注";
+  if (action.type === "allIn") return "全下";
+  return `加注到 ${action.amount}`;
+}
+
+async function requestBotModel(room: RoomRecord, bot: RoomMemberRecord, environment?: ModelEnvironment): Promise<ModelDecision | null> {
+  if (!room.game || !bot.modelProvider) return null;
+  const actor = room.game.players[room.game.currentPlayer];
+  if (!actor || actor.id !== bot.id) return null;
+  const request = new Request("https://pocket.internal/api/ai-decision", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-pocket-internal": "online-bot" },
+    body: JSON.stringify({
+      provider: bot.modelProvider,
+      context: buildModelContext(room.game, actor, room.turnTime, bot.skillId),
+      reasoning: room.maxReasoning ? "max" : "standard",
+      actionTimeSeconds: room.turnTime,
+    }),
+  });
+  const result = await handleAiDecisionRequest(request, environment);
+  if (!result.ok) return null;
+  return await result.json().catch(() => null) as ModelDecision | null;
+}
+
+async function finishBotTurn(db: D1Database, code: string, lease: AiTurnLease, decision: ModelDecision | null): Promise<StoredRoom> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const stored = await currentRoom(db, code);
+    const room = structuredClone(stored.room);
+    const bot = activeBot(room);
+    if (!bot || room.version !== lease.gameVersion || room.aiTurn?.leaseId !== lease.leaseId || !room.game) return stored;
+    const actor = room.game.players[room.game.currentPlayer];
+    const modelAction = decision ? normalizeModelAction(room.game, actor, decision) : null;
+    const action = modelAction || chooseAiAction(room.game, actor);
+    room.game = applyAction(room.game, actor.id, action);
+    room.aiTurn = null;
+    room.version += 1;
+    room.message = room.game.message;
+    const source = modelAction
+      ? `${decision?.provider || bot.modelName || "模型"}${decision?.model ? ` · ${decision.model}` : ""}`
+      : bot.modelProvider ? `${bot.modelName || "模型"} 不可用，已回退本机最高强度` : "本机最高强度";
+    addSystemMessage(room, `${bot.name} ${actionText(action)} · ${source}`);
+    if (modelAction && decision?.provider) bot.modelName = decision.provider;
+    const next = withDeadline(room);
+    if (await writeRoom(db, code, stored.revision, next)) return { room: next, revision: stored.revision + 1 };
+  }
+  return currentRoom(db, code);
+}
+
+async function resolveAiTurn(db: D1Database, code: string, initial: StoredRoom, environment?: ModelEnvironment): Promise<StoredRoom> {
+  let stored = initial;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const bot = activeBot(stored.room);
+    if (!bot) return stored;
+    const queued = stored.room.aiTurn;
+    const matches = queued?.playerId === bot.id && queued.gameVersion === stored.room.version;
+    if (!matches) {
+      const room = structuredClone(stored.room);
+      room.aiTurn = { playerId: bot.id, gameVersion: room.version, leaseId: "", startedAt: 0 };
+      if (await writeRoom(db, code, stored.revision, room)) return { room, revision: stored.revision + 1 };
+      stored = await currentRoom(db, code);
+      continue;
+    }
+    if (queued.leaseId) return stored;
+    const room = structuredClone(stored.room);
+    const lease = { ...queued, leaseId: crypto.randomUUID(), startedAt: Date.now() };
+    room.aiTurn = lease;
+    if (!await writeRoom(db, code, stored.revision, room)) {
+      stored = await currentRoom(db, code);
+      continue;
+    }
+    const minimumThinking = new Promise<void>((resolve) => setTimeout(resolve, 1_800 + Math.floor(Math.random() * 1_800)));
+    const modelDecision = requestBotModel(room, bot, environment).catch(() => null);
+    const [decision] = await Promise.all([modelDecision, minimumThinking]);
+    return finishBotTurn(db, code, lease, decision);
+  }
+  return currentRoom(db, code);
 }
 
 async function messageRoom(db: D1Database, code: string, request: Request): Promise<Response> {
@@ -339,13 +471,14 @@ async function messageRoom(db: D1Database, code: string, request: Request): Prom
   throw new RoomRequestError(409, "房间刚刚发生变化，请重试");
 }
 
-async function roomSnapshot(db: D1Database, code: string, request: Request): Promise<Response> {
-  const stored = await currentRoom(db, code);
+async function roomSnapshot(db: D1Database, code: string, request: Request, environment?: ModelEnvironment): Promise<Response> {
+  let stored = await currentRoom(db, code);
   const member = authenticate(stored.room, request);
+  stored = await resolveAiTurn(db, code, stored, environment);
   return response({ snapshot: await snapshot(db, stored.room, member.id) });
 }
 
-export async function handleOnlineRequest(request: Request, db: D1Database): Promise<Response> {
+export async function handleOnlineRequest(request: Request, db: D1Database, environment?: ModelEnvironment): Promise<Response> {
   try {
     await ensureSchema(db);
     const url = new URL(request.url);
@@ -355,7 +488,7 @@ export async function handleOnlineRequest(request: Request, db: D1Database): Pro
     const code = match[1].toUpperCase();
     const action = match[2];
     if (request.method === "POST" && action === "join") return joinRoom(db, code, request);
-    if (request.method === "GET" && action === "snapshot") return roomSnapshot(db, code, request);
+    if (request.method === "GET" && action === "snapshot") return roomSnapshot(db, code, request, environment);
     if (request.method === "POST" && action === "message") return messageRoom(db, code, request);
     throw new RoomRequestError(400, "联机请求无效");
   } catch (error) {

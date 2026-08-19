@@ -10,6 +10,8 @@ export type OnlineMember = {
   ready: boolean;
   connected: boolean;
   isHost: boolean;
+  isBot: boolean;
+  modelName?: string;
 };
 
 export type OnlineChatMessage = {
@@ -34,6 +36,7 @@ export type OnlineRoomSnapshot = {
   version: number;
   message: string;
   chat: OnlineChatMessage[];
+  aiThinking: { playerId: string; modelName: string; startedAt: number } | null;
 };
 
 export type OnlineSession = {

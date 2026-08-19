@@ -1,4 +1,4 @@
-import type { OpponentSkill } from "./types";
+import type { OpponentSkill } from "./types.ts";
 
 export const miraSkill: OpponentSkill = {
   id: "mira",
