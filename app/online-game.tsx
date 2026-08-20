@@ -6,6 +6,7 @@ import {
   type Card, type GameAction, type GameState, type Player,
 } from "./game";
 import type { OnlineChatMessage, OnlineClientMessage, OnlineRoomSnapshot, OnlineSession } from "./online";
+import { ModelChoiceOptions } from "./model-choice";
 
 type TurnTime = 30 | 120 | 300;
 type ConnectionState = "connecting" | "connected" | "reconnecting" | "offline";
@@ -135,6 +136,20 @@ export function OnlineExperience({ capacity, turnTime, modelOptions, selectedMod
   const [botCount, setBotCount] = useState(Math.min(1, capacity - 1));
   const configuredModels = modelOptions.filter((option) => option.configured);
   const [botModel, setBotModel] = useState(() => configuredModels.some((option) => option.id === selectedModel) ? selectedModel : configuredModels[0]?.id || "");
+  const [botModelOpen, setBotModelOpen] = useState(false);
+  const botModelRef = useRef<HTMLDivElement>(null);
+  // "" means the room falls back to the server-side local engine at full strength.
+  const botModelChoices = [{ id: "", name: "本机最高强度", model: "无需网络，始终可用", mark: "P" }, ...configuredModels];
+  const botModelLabel = botModelChoices.find((choice) => choice.id === botModel) || botModelChoices[0];
+
+  useEffect(() => {
+    if (!botModelOpen) return;
+    const close = (event: PointerEvent) => {
+      if (!botModelRef.current?.contains(event.target as Node)) setBotModelOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [botModelOpen]);
 
   useEffect(() => {
     if (!session) return;
@@ -246,7 +261,23 @@ export function OnlineExperience({ capacity, turnTime, modelOptions, selectedMod
               <div className="online-ai-count" aria-label="AI 席位数量">
                 {Array.from({ length: capacity }, (_, count) => <button type="button" className={botCount === count ? "selected" : ""} key={count} onClick={() => setBotCount(count)}>{count}</button>)}
               </div>
-              {botCount > 0 && <label className="online-model-select"><span>决策模型</span><select value={botModel} onChange={(event) => setBotModel(event.target.value)}><option value="">本机最高强度</option>{configuredModels.map((option) => <option value={option.id} key={option.id}>{option.name} · {option.model}</option>)}</select><small>{botModel ? `${maxReasoning ? "极致" : "标准"}思考 · 密钥仅在服务器使用` : "模型不可用时也会自动采用本机最高强度"}</small></label>}
+              {botCount > 0 && (
+                <div className={`online-model-select ${botModelOpen ? "is-open" : ""}`} ref={botModelRef}>
+                  <span>决策模型</span>
+                  <button type="button" className="online-model-trigger" aria-haspopup="listbox" aria-expanded={botModelOpen} onClick={() => setBotModelOpen((value) => !value)}>
+                    <b>{botModelLabel.id ? `${botModelLabel.name} · ${botModelLabel.model}` : botModelLabel.name}</b>
+                    <i>{botModelOpen ? "↑" : "↓"}</i>
+                  </button>
+                  <small>{botModel ? `${maxReasoning ? "极致" : "标准"}思考 · 密钥仅在服务器使用` : "模型不可用时也会自动采用本机最高强度"}</small>
+                  {botModelOpen && (
+                    <div className="lobby-model-popover online-model-popover" role="listbox" aria-label="选择 AI 席位使用的模型">
+                      <div className="lobby-model-popover-head"><strong>AI 席位模型</strong><small>密钥只在服务端使用</small></div>
+                      <ModelChoiceOptions choices={botModelChoices} value={botModel} onPick={(id) => { setBotModel(id); setBotModelOpen(false); }} />
+                      {!configuredModels.length && <p>本地尚未识别到可用模型，AI 席位将使用本机最高强度。</p>}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="online-room-actions">
               <button className="primary-button" disabled={busy} onClick={() => void enter("create")}>创建房间 <span>→</span></button>

@@ -3,13 +3,18 @@ import test from "node:test";
 import {
   applyAction,
   canPlayerRaise,
+  estimateEquity,
   evaluateBest,
   legalRaiseBounds,
   LOCAL_AI_PROFILE,
   newOnlineSession,
   newSession,
+  newSpectatorSession,
+  simulationBudget,
+  spectatorSeatProfiles,
   startNextHand,
 } from "../app/game.ts";
+import { OPPONENT_SKILLS } from "../app/ai-skills.ts";
 
 const card = (rank, suit) => ({ rank, suit, id: `${rank}${suit}` });
 
@@ -138,4 +143,105 @@ test("two triplets correctly form a full house", () => {
   ]);
   assert.equal(result.label, "葫芦");
   assert.deepEqual(result.score, [6, 14, 13]);
+  assert.equal(result.cards.length, 5);
+  assert.deepEqual(result.cards.map((item) => item.rank), [14, 14, 14, 13, 13]);
+});
+
+test("the simulation budget keeps one decision in a similar time slice at every table size", () => {
+  // Cost per decision is roughly simulations × (rivals + 1), so heads-up and three-handed
+  // tables keep the full budget and bigger tables trade samples for a steady frame time.
+  assert.equal(simulationBudget(960, 1), 960);
+  assert.equal(simulationBudget(960, 2), 960);
+  assert.equal(simulationBudget(960, 3), 640);
+  assert.equal(simulationBudget(960, 4), 480);
+  assert.equal(simulationBudget(960, 5), 384);
+  assert.ok(simulationBudget(960, 5) * 6 < simulationBudget(960, 1) * 2 * 1.35);
+  // A quality floor still applies, and a base below that floor is never scaled down.
+  assert.equal(simulationBudget(260, 5), 160);
+  assert.equal(simulationBudget(120, 5), 120);
+});
+
+test("the equity sampler still separates a monster from a dry hand", () => {
+  const community = [card(4, "c"), card(7, "d"), card(9, "h")];
+  const table = state(
+    [player("a", 500, [card(14, "s"), card(14, "h")]), player("b", 500, [card(2, "d"), card(3, "c")])],
+    { phase: "flop", community },
+  );
+  const aces = estimateEquity(table, table.players[0], 400);
+  const airball = estimateEquity(table, table.players[1], 400);
+  assert.ok(aces > 0.6, `aces on a dry flop should be a clear favourite, got ${aces}`);
+  assert.ok(airball < 0.4, `three-high should be a clear underdog, got ${airball}`);
+});
+
+test("a spectator session seats only named skill opponents and honours per-seat AI choices", () => {
+  const game = newSpectatorSession(4, { mira: "deepseek", knox: "glm" });
+  assert.equal(game.tableMode, "spectator");
+  assert.equal(game.players.length, 4);
+  assert.ok(game.players.every((candidate) => !candidate.isHuman));
+  assert.ok(game.players.every((candidate) => candidate.name !== "你" && candidate.avatar !== "你"));
+  assert.deepEqual(game.players.map((candidate) => candidate.id), spectatorSeatProfiles(4).map((seat) => seat.id));
+  assert.ok(game.players.every((candidate) => OPPONENT_SKILLS[candidate.id]));
+  assert.equal(game.players.find((candidate) => candidate.id === "mira").aiProvider, "deepseek");
+  assert.equal(game.players.find((candidate) => candidate.id === "knox").aiProvider, "glm");
+  assert.equal(game.players.find((candidate) => candidate.id === "iris").aiProvider, "local");
+  assert.deepEqual(game.revealedHands, []);
+  assert.deepEqual(game.decisionTiming, {});
+});
+
+test("decision time is logged, accumulated per player, and cleared for each new hand", () => {
+  const a = player("a", 500, [card(14, "s"), card(13, "s")]);
+  const b = player("b", 500, [card(2, "s"), card(3, "h")]);
+  let game = state([a, b], { phase: "flop", community: [card(4, "c"), card(7, "d"), card(9, "h")] });
+
+  game = applyAction(game, "a", { type: "raise", amount: 40 }, 12.34);
+  assert.deepEqual(game.decisionTiming.a, { last: 12.3, hand: [12.3], total: 12.3, samples: 1 });
+  assert.match(game.log[0].text, /用时 12\.3 秒/);
+
+  game = applyAction(game, "b", { type: "checkCall" });
+  assert.equal(game.decisionTiming.b, undefined);
+  assert.doesNotMatch(game.log[0].text, /用时/);
+
+  game = applyAction(game, "b", { type: "checkCall" }, 5);
+  game = applyAction(game, "a", { type: "checkCall" }, 3.05);
+  assert.deepEqual(game.decisionTiming.a, { last: 3.1, hand: [12.3, 3.1], total: 15.4, samples: 2 });
+  assert.deepEqual(game.decisionTiming.b, { last: 5, hand: [5], total: 5, samples: 1 });
+
+  const next = startNextHand({ ...game, status: "handOver" });
+  assert.deepEqual(next.decisionTiming.a, { last: 3.1, hand: [], total: 15.4, samples: 2 });
+  assert.deepEqual(next.decisionTiming.b, { last: 5, hand: [], total: 5, samples: 1 });
+});
+
+test("a contested hand publishes the board and every tabled hand", () => {
+  const a = player("a", 500, [card(2, "s"), card(3, "s")]);
+  const b = player("b", 300, [card(14, "s"), card(14, "h")]);
+  let game = state([a, b], {
+    phase: "river",
+    community: [card(4, "c"), card(7, "d"), card(9, "h"), card(11, "c"), card(12, "d")],
+  });
+  game = applyAction(game, "a", { type: "allIn" });
+  game = applyAction(game, "b", { type: "checkCall" });
+
+  const shown = game.revealedHands[0];
+  assert.equal(shown.handNo, 1);
+  assert.equal(shown.reachedShowdown, true);
+  assert.equal(shown.pot, 600);
+  assert.deepEqual(shown.board, ["4♣", "7♦", "9♥", "J♣", "Q♦"]);
+  assert.deepEqual(shown.reveals.map((reveal) => reveal.id), ["a", "b"]);
+  assert.deepEqual(shown.reveals.map((reveal) => reveal.won), [false, true]);
+  assert.deepEqual(shown.reveals[1].hole, ["A♠", "A♥"]);
+  assert.equal(shown.reveals[1].label, "一对");
+});
+
+test("a pot won because everyone folded is taken without showing a hand", () => {
+  const a = player("a", 480, [card(2, "s"), card(3, "s")], { bet: 20, totalBet: 20 });
+  const b = player("b", 460, [card(14, "s"), card(14, "h")], { bet: 40, totalBet: 40 });
+  let game = state([a, b], { currentPlayer: 0, currentBet: 40, minRaise: 20, acted: ["b"], actedAt: { b: 40 } });
+  game = applyAction(game, "a", { type: "fold" });
+
+  assert.equal(game.status, "handOver");
+  const shown = game.revealedHands[0];
+  assert.equal(shown.reachedShowdown, false);
+  assert.equal(shown.pot, 40);
+  assert.deepEqual(shown.board, []);
+  assert.deepEqual(shown.reveals, []);
 });

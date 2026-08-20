@@ -2,11 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  LOCAL_AI_PROFILE, applyAction, chooseAiAction, evaluateBest, formatChips, getBlindProgress, getPot, legalRaiseBounds,
-  newSession, phaseLabel, preflopLabel, rankLabel, startNextHand, suitSymbol,
+  AI_SEAT_PROFILES, LOCAL_AI_PROFILE, applyAction, cardCode, chooseAiAction, evaluateBest, formatChips,
+  getBlindProgress, getPot, legalRaiseBounds, newSession, newSpectatorSession, phaseLabel, preflopLabel, rankLabel,
+  spectatorSeatProfiles, startNextHand, suitSymbol,
   type Card, type GameAction, type GameState, type Player,
 } from "./game";
 import { OPPONENT_SKILLS } from "./ai-skills";
+import { ModelChoiceOptions, type ModelChoice } from "./model-choice";
 import { OnlineExperience } from "./online-game";
 import { buildModelContext, normalizeModelAction, type ModelDecision } from "./model-poker";
 
@@ -14,6 +16,10 @@ type Settings = {
   gameMode: GameMode;
   playerCount: PlayerCount;
   turnTime: TurnTime;
+  spectatorAiMode: SpectatorAiMode;
+  spectatorProvider: string;
+  spectatorProviders: Record<string, string>;
+  spectatorReveal: boolean;
   modelAiEnabled: boolean;
   modelProvider: string;
   maxReasoning: boolean;
@@ -23,8 +29,9 @@ type Settings = {
 };
 
 type PlayerCount = 2 | 3 | 4 | 5 | 6;
-type GameMode = "local" | "online";
+type GameMode = "local" | "spectator" | "online";
 type TurnTime = 30 | 120 | 300;
+type SpectatorAiMode = "shared" | "individual";
 type ReviewMode = "training" | "standard";
 type ModelStatus = { tone: "idle" | "working" | "ready" | "fallback"; text: string };
 type ModelUsage = { input: number; output: number; total: number };
@@ -75,11 +82,25 @@ const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
   { id: "kimi", name: "Kimi", model: "kimi-k2.6", configured: false, hint: "在 .env.local 设置 KIMI_API_KEY" },
   { id: "glm", name: "GLM", model: "glm-5.2", configured: false, hint: "在 .env.local 设置 GLM_API_KEY" },
 ];
+const SPECTATOR_ROSTER = AI_SEAT_PROFILES;
+const DEFAULT_SPECTATOR_PROVIDERS = Object.fromEntries(SPECTATOR_ROSTER.map((seat) => [seat.id, "local"]));
 const DEFAULT_SETTINGS: Settings = {
-  gameMode: "local", playerCount: 4, turnTime: 30, modelAiEnabled: false,
+  gameMode: "local", playerCount: 4, turnTime: 30, spectatorAiMode: "shared", spectatorProvider: "local",
+  spectatorProviders: DEFAULT_SPECTATOR_PROVIDERS,
+  spectatorReveal: true,
+  modelAiEnabled: false,
   modelProvider: "openai", maxReasoning: true,
-  sound: true, autoNext: false, reviewMode: "training",
+  sound: true, autoNext: false, reviewMode: "standard",
 };
+
+function gameModeLabel(mode: GameMode): string {
+  return mode === "spectator" ? "AI 观战" : mode === "online" ? "联机对局" : "本地对局";
+}
+
+function modelDisplayName(id: string, options: ModelOption[]): string {
+  if (id === "local") return "本地 AI";
+  return options.find((item) => item.id === id)?.name || id;
+}
 const DEFAULT_STATS: Stats = { hands: 0, wins: 0, biggestPot: 0, streak: 0, bestStreak: 0 };
 
 const MODEL_TEST_CONTEXT = {
@@ -96,10 +117,6 @@ const MODEL_TEST_CONTEXT = {
   actionDeadlineSeconds: 120,
   legalActions: { fold: true, checkCall: true, allIn: true, raise: true, minRaiseTo: 40, maxRaiseTo: 2000 },
 };
-
-function cardCode(card: Card): string {
-  return `${rankLabel[card.rank]}${suitSymbol[card.suit]}`;
-}
 
 function describeModelAction(action: GameAction, game: GameState, player: Player): string {
   if (action.type === "fold") return "弃牌";
@@ -147,8 +164,21 @@ async function requestModelDecision(provider: string, context: unknown, reasonin
   return payload;
 }
 
+/** One connection test: the same probe hand for the local model card and for every spectator seat. */
+async function probeModel(option: ModelOption, reasoning: "standard" | "max"): Promise<string> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), option.id === "minimax" ? 245_000 : 185_000);
+  try {
+    const result = await requestModelDecision(option.id, MODEL_TEST_CONTEXT, reasoning, controller.signal);
+    if (!["fold", "checkCall", "raise", "allIn"].includes(String(result.action))) throw new Error("模型返回的动作无效");
+    return result.model || option.model;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 async function requestModelAction(game: GameState, player: Player, provider: string, reasoning: "standard" | "max", signal: AbortSignal, actionTimeSeconds: TurnTime): Promise<ModelActionResult> {
-  const payload = await requestModelDecision(provider, buildModelContext(game, player, actionTimeSeconds), reasoning, signal, actionTimeSeconds);
+  const payload = await requestModelDecision(provider, buildModelContext(game, player, actionTimeSeconds, player.id, { maxReasoning: reasoning === "max" }), reasoning, signal, actionTimeSeconds);
   const action = normalizeModelAction(game, player, payload);
   if (!action) throw new Error("模型返回的动作无法执行");
   return {
@@ -196,13 +226,32 @@ const SEAT_PLACEMENTS: Record<number, SeatPlacement[]> = {
   6: [{ x: 50, y: 91, side: "bottom" }, { x: 13, y: 64, side: "left" }, { x: 17, y: 23, side: "left" }, { x: 50, y: 9, side: "top" }, { x: 83, y: 23, side: "right" }, { x: 87, y: 64, side: "right" }],
 };
 
-function Seat({ player, index, game, modelThinking }: { player: Player; index: number; game: GameState; modelThinking: boolean }) {
+function Seat({ player, index, game, modelThinking, aiThinking, spectator, revealed, peeked, onPeek }: {
+  player: Player;
+  index: number;
+  game: GameState;
+  modelThinking: boolean;
+  aiThinking: boolean;
+  spectator: boolean;
+  revealed: boolean;
+  peeked: boolean;
+  onPeek: () => void;
+}) {
   const isActive = game.status === "playing" && game.currentPlayer === index;
-  const showCards = game.phase === "showdown" && !player.folded;
+  const dealt = player.hole.length > 0;
+  // A hand tabled at showdown is the engine's call, so a spectator click cannot hide it again.
+  const tabled = game.phase === "showdown" && !player.folded;
+  // Every spectator click flips this seat away from the current default: hidden seats open, open seats close.
+  const spectatorOpen = spectator && dealt && revealed !== peeked;
+  const showCards = tabled || spectatorOpen;
+  const canPeek = spectator && dealt && !tabled;
   const winner = game.winners.some((group) => group.ids.includes(player.id));
   const seatName = player.isHuman ? "seat-you" : `seat-${player.id}`;
   const stateText = player.folded ? "已弃牌" : player.allIn ? "全下" : player.chips <= 0 ? "已出局" : "";
   const placement = SEAT_PLACEMENTS[game.players.length]?.[index] || SEAT_PLACEMENTS[4][index];
+  const handTag = showCards && player.hole.length === 2
+    ? game.community.length >= 3 ? evaluateBest([...player.hole, ...game.community]).label : preflopLabel(player.hole)
+    : "";
 
   return (
     <div
@@ -210,12 +259,26 @@ function Seat({ player, index, game, modelThinking }: { player: Player; index: n
       style={{ "--seat-x": `${placement.x}%`, "--seat-y": `${placement.y}%` } as React.CSSProperties}
     >
       {!player.isHuman && (
-        <div className="opponent-cards" aria-label={`${player.name} 的手牌`}>
-          <CardView card={showCards ? player.hole[0] : undefined} hidden={!showCards && player.hole.length > 0} small delay={80} />
-          <CardView card={showCards ? player.hole[1] : undefined} hidden={!showCards && player.hole.length > 0} small delay={150} />
+        <div className={`opponent-cards ${showCards || canPeek ? "is-open" : ""}`} aria-label={`${player.name} 的手牌`}>
+          {canPeek ? (
+            <button
+              type="button" className="opponent-card-pair" onClick={onPeek} aria-pressed={showCards}
+              title={showCards ? `收起 ${player.name} 的底牌` : `查看 ${player.name} 的底牌`}
+              aria-label={showCards ? `收起 ${player.name} 的底牌` : `查看 ${player.name} 的底牌`}
+            >
+              <CardView card={showCards ? player.hole[0] : undefined} hidden={!showCards} small delay={80} />
+              <CardView card={showCards ? player.hole[1] : undefined} hidden={!showCards} small delay={150} />
+            </button>
+          ) : (
+            <span className="opponent-card-pair">
+              <CardView card={showCards ? player.hole[0] : undefined} hidden={!showCards && dealt} small delay={80} />
+              <CardView card={showCards ? player.hole[1] : undefined} hidden={!showCards && dealt} small delay={150} />
+            </span>
+          )}
+          {handTag && <em className="opponent-hand-tag">{handTag}</em>}
         </div>
       )}
-      {isActive && <span className={`seat-turn-label ${player.isHuman ? "is-you" : ""}`}>{player.isHuman ? "你的回合" : modelThinking ? "模型思考中" : "正在行动"}</span>}
+      {isActive && <span className={`seat-turn-label ${player.isHuman ? "is-you" : ""}`}>{player.isHuman ? "你的回合" : spectator ? modelThinking ? "模型思考中" : aiThinking ? "AI 思考中" : "正在行动" : modelThinking ? "模型思考中" : "正在行动"}</span>}
       <div className="seat-profile">
         <span className="seat-avatar">{player.avatar}</span>
         <span className="seat-copy">
@@ -244,9 +307,14 @@ export default function Home() {
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(DEFAULT_MODEL_OPTIONS);
   const [testingModel, setTestingModel] = useState(false);
   const [modelThinkingId, setModelThinkingId] = useState<string | null>(null);
+  const [aiThinkingId, setAiThinkingId] = useState<string | null>(null);
   const [modelStatus, setModelStatus] = useState<ModelStatus>({ tone: "idle", text: "正在读取本地模型配置" });
+  // Connection results for the spectator seats, keyed by provider id; untested providers are simply absent.
+  const [providerTests, setProviderTests] = useState<Record<string, ModelStatus>>({});
   const [modelAudit, setModelAudit] = useState<ModelAuditEntry[]>([]);
   const [onlineOpen, setOnlineOpen] = useState(false);
+  const [spectatorPaused, setSpectatorPaused] = useState(false);
+  const [peekedSeats, setPeekedSeats] = useState<string[]>([]);
   const recordedHand = useRef(0);
   const soundedHand = useRef(0);
   const soundedBoard = useRef("");
@@ -263,9 +331,15 @@ export default function Home() {
         if (storedSettings) {
           const parsedSettings = JSON.parse(storedSettings) as Partial<Settings>;
           nextSettings = {
-            gameMode: ["local", "online"].includes(String(parsedSettings.gameMode)) ? parsedSettings.gameMode as GameMode : DEFAULT_SETTINGS.gameMode,
+            gameMode: ["local", "spectator", "online"].includes(String(parsedSettings.gameMode)) ? parsedSettings.gameMode as GameMode : DEFAULT_SETTINGS.gameMode,
             playerCount: [2, 3, 4, 5, 6].includes(Number(parsedSettings.playerCount)) ? parsedSettings.playerCount as PlayerCount : DEFAULT_SETTINGS.playerCount,
             turnTime: [30, 120, 300].includes(Number(parsedSettings.turnTime)) ? parsedSettings.turnTime as TurnTime : DEFAULT_SETTINGS.turnTime,
+            spectatorAiMode: ["shared", "individual"].includes(String(parsedSettings.spectatorAiMode)) ? parsedSettings.spectatorAiMode as SpectatorAiMode : DEFAULT_SETTINGS.spectatorAiMode,
+            spectatorProvider: typeof parsedSettings.spectatorProvider === "string" ? parsedSettings.spectatorProvider : DEFAULT_SETTINGS.spectatorProvider,
+            spectatorProviders: parsedSettings.spectatorProviders && typeof parsedSettings.spectatorProviders === "object"
+              ? { ...DEFAULT_SPECTATOR_PROVIDERS, ...Object.fromEntries(Object.entries(parsedSettings.spectatorProviders).filter(([id, provider]) => SPECTATOR_ROSTER.some((seat) => seat.id === id) && typeof provider === "string")) }
+              : DEFAULT_SETTINGS.spectatorProviders,
+            spectatorReveal: parsedSettings.spectatorReveal ?? DEFAULT_SETTINGS.spectatorReveal,
             modelAiEnabled: Boolean(parsedSettings.modelAiEnabled),
             modelProvider: typeof parsedSettings.modelProvider === "string" ? parsedSettings.modelProvider : DEFAULT_SETTINGS.modelProvider,
             maxReasoning: parsedSettings.maxReasoning ?? DEFAULT_SETTINGS.maxReasoning,
@@ -281,6 +355,8 @@ export default function Home() {
             parsed.game.players = parsed.game.players.map((player) => ({ ...player, lastAction: player.lastAction || "等待行动" }));
             parsed.game.blindLevel ||= 1;
             parsed.game.actedAt ||= {};
+            parsed.game.decisionTiming ||= {};
+            parsed.game.revealedHands ||= [];
             if (Array.isArray(parsed.modelAudit)) setModelAudit(parsed.modelAudit.slice(0, 60));
             setSavedSession(parsed);
           }
@@ -324,7 +400,7 @@ export default function Home() {
   useEffect(() => { if (hydrated) localStorage.setItem("pocket-settings", JSON.stringify(settings)); }, [settings, hydrated]);
   useEffect(() => { if (hydrated) localStorage.setItem("pocket-stats", JSON.stringify(stats)); }, [stats, hydrated]);
   useEffect(() => {
-    if (!hydrated || !game) return;
+    if (!hydrated || !game || game.tableMode !== "local") return;
     const timeout = window.setTimeout(() => localStorage.setItem("pocket-active-session", JSON.stringify({ game, modelAudit, savedAt: Date.now() })), 0);
     return () => window.clearTimeout(timeout);
   }, [game, modelAudit, hydrated]);
@@ -338,13 +414,15 @@ export default function Home() {
   }, []);
 
   const human = game?.players.find((player) => player.isHuman);
+  const viewer = human || game?.players[0];
+  const isSpectator = game?.tableMode === "spectator";
   const isHumanTurn = Boolean(game && human && game.status === "playing" && game.players[game.currentPlayer]?.isHuman);
   const due = game && human ? Math.max(0, game.currentBet - human.bet) : 0;
   const bounds = game && human ? legalRaiseBounds(game, human) : { min: 0, max: 0 };
   const pot = game ? getPot(game) : 0;
   const defaultRaise = Math.max(bounds.min, Math.min(bounds.max, Math.round(Math.max(bounds.min, pot * 0.6) / 10) * 10));
-  const handLabel = human
-    ? game && game.community.length >= 3 ? evaluateBest([...human.hole, ...game.community]).label : preflopLabel(human.hole)
+  const handLabel = viewer
+    ? game && game.community.length >= 3 ? evaluateBest([...viewer.hole, ...game.community]).label : preflopLabel(viewer.hole)
     : "等待发牌";
 
   const playTone = useCallback((kind: "deal" | "turn" | "clock" | "action" | "raise" | "fold" | "win" | "lose", force = false) => {
@@ -382,6 +460,9 @@ export default function Home() {
     if (isHumanTurn) playTone("turn");
   }, [isHumanTurn, playTone]);
 
+  // Seats the spectator clicked open or closed against the current default; cleared on every new deal.
+  useEffect(() => { setPeekedSeats([]); }, [game?.handNo]);
+
   useEffect(() => {
     if (isHumanTurn && timer > 0 && timer <= 5) playTone("clock");
   }, [isHumanTurn, playTone, timer]);
@@ -405,25 +486,29 @@ export default function Home() {
     if (!game || !human || !isHumanTurn) return;
     playTone(action.type === "fold" ? "fold" : action.type === "raise" || action.type === "allIn" ? "raise" : "action");
     setShowRaise(false);
-    setGame((current) => current ? applyAction(current, human.id, action) : current);
-  }, [game, human, isHumanTurn, playTone]);
+    const spent = Math.max(0, settings.turnTime - timer);
+    setGame((current) => current ? applyAction(current, human.id, action, spent) : current);
+  }, [game, human, isHumanTurn, playTone, settings.turnTime, timer]);
 
   useEffect(() => {
-    if (!game || game.status !== "playing" || game.currentPlayer < 0) return;
+    if (spectatorPaused || !game || game.status !== "playing" || game.currentPlayer < 0) return;
     const player = game.players[game.currentPlayer];
     if (player.isHuman) return;
     const wait = aiDecisionDelay(game, player, settings.turnTime);
     const controller = new AbortController();
     let cancelled = false;
     let delayTimer: number | undefined;
+    let auditId = "";
+    let auditSettled = false;
     const turnStartedAt = Date.now();
     const deadline = window.setTimeout(() => controller.abort(), settings.turnTime * 1_000);
     const runTurn = async () => {
-      const selectedModel = modelOptions.find((item) => item.id === settings.modelProvider);
-      const useModel = settings.modelAiEnabled && Boolean(selectedModel?.configured);
+      const providerId = isSpectator ? (player.aiProvider || "local") : settings.modelAiEnabled ? settings.modelProvider : "local";
+      const selectedModel = modelOptions.find((item) => item.id === providerId);
+      const useModel = providerId !== "local" && Boolean(selectedModel?.configured);
       let action: GameAction | null = null;
-      let auditId = "";
       let fallbackDetail = "";
+      setAiThinkingId(player.id);
       if (useModel) {
         const providerName = selectedModel?.name || settings.modelProvider;
         auditId = `${game.handNo}-${player.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -434,8 +519,9 @@ export default function Home() {
         setModelThinkingId(player.id);
         setModelStatus({ tone: "working", text: `${player.name} 正在请求 ${selectedModel?.model || providerName}` });
         try {
-          const result = await requestModelAction(game, player, settings.modelProvider, settings.maxReasoning ? "max" : "standard", controller.signal, settings.turnTime);
+          const result = await requestModelAction(game, player, providerId, settings.maxReasoning ? "max" : "standard", controller.signal, settings.turnTime);
           action = result.action;
+          auditSettled = true;
           updateModelAudit(auditId, {
             status: "success", provider: providerName, model: result.model,
             action: describeModelAction(result.action, game, player), detail: result.note || "模型返回合法动作",
@@ -457,43 +543,59 @@ export default function Home() {
           });
           if (!cancelled) setModelStatus({ tone: "ready", text: `${player.name} 已使用 ${providerName} 完成决策` });
         } catch (error) {
+          if (cancelled) return;
           fallbackDetail = controller.signal.aborted ? `超过 ${settings.turnTime} 秒行动时限` : safeModelError(error);
-          if (cancelled) updateModelAudit(auditId, { status: "fallback", detail: fallbackDetail });
-          if (!cancelled) setModelStatus({ tone: "fallback", text: `${player.name}：${fallbackDetail}` });
+          auditSettled = true;
+          updateModelAudit(auditId, { status: "fallback", detail: fallbackDetail });
+          setModelStatus({ tone: "fallback", text: `${player.name}：${fallbackDetail}` });
         } finally {
           if (!cancelled) setModelThinkingId(null);
         }
       }
       if (cancelled) return;
       if (!action) {
-        action = chooseAiAction(game, player);
-        if (auditId) updateModelAudit(auditId, {
-          status: "fallback", action: `本地 AI · ${describeModelAction(action, game, player)}`,
-          detail: fallbackDetail || "模型未返回可执行动作", completedAt: Date.now(),
-        });
+        action = chooseAiAction(game, player, { maxReasoning: settings.maxReasoning });
+        if (auditId) {
+          auditSettled = true;
+          updateModelAudit(auditId, {
+            status: "fallback", action: `本地 AI · ${describeModelAction(action, game, player)}`,
+            detail: fallbackDetail || "模型未返回可执行动作", completedAt: Date.now(),
+          });
+        }
       }
       const remainingWait = Math.max(0, wait - (Date.now() - turnStartedAt));
       if (remainingWait > 0) await new Promise<void>((resolve) => { delayTimer = window.setTimeout(resolve, remainingWait); });
       if (cancelled) return;
       window.clearTimeout(deadline);
       playTone(action.type === "fold" ? "fold" : action.type === "raise" || action.type === "allIn" ? "raise" : "action");
+      // The elapsed time a spectator actually watched, including the deliberate pacing delay.
+      const thinkingSeconds = (Date.now() - turnStartedAt) / 1000;
       setGame((current) => {
         if (!current || current.status !== "playing" || current.handNo !== game.handNo) return current;
         const actor = current.players[current.currentPlayer];
         if (!actor || actor.id !== player.id || actor.isHuman) return current;
-        return applyAction(current, actor.id, action!);
+        return applyAction(current, actor.id, action!, thinkingSeconds);
       });
     };
     void runTurn();
-    return () => { cancelled = true; controller.abort(); window.clearTimeout(deadline); if (delayTimer) window.clearTimeout(delayTimer); };
-  }, [game, settings.maxReasoning, settings.modelAiEnabled, settings.modelProvider, settings.turnTime, modelOptions, addModelAudit, updateModelAudit, playTone]);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearTimeout(deadline);
+      if (delayTimer) window.clearTimeout(delayTimer);
+      if (auditId && !auditSettled) updateModelAudit(auditId, { status: "fallback", detail: "请求已取消（观战暂停或牌局状态变化）", completedAt: Date.now() });
+      setAiThinkingId((current) => current === player.id ? null : current);
+      setModelThinkingId((current) => current === player.id ? null : current);
+    };
+  }, [game, isSpectator, modelOptions, settings.maxReasoning, settings.modelAiEnabled, settings.modelProvider, settings.turnTime, spectatorPaused, addModelAudit, updateModelAudit, playTone]);
 
   useEffect(() => {
+    if (spectatorPaused) return;
     const reset = window.setTimeout(() => setTimer(settings.turnTime), 0);
     if (!game || game.status !== "playing" || game.currentPlayer < 0) return () => window.clearTimeout(reset);
     const interval = window.setInterval(() => setTimer((value) => Math.max(0, value - 1)), 1000);
     return () => { window.clearTimeout(reset); window.clearInterval(interval); };
-  }, [game, settings.turnTime]);
+  }, [game, settings.turnTime, spectatorPaused]);
 
   useEffect(() => {
     if (timer !== 0 || !game || !human || !isHumanTurn) return;
@@ -502,7 +604,7 @@ export default function Home() {
   }, [timer, game, human, isHumanTurn, due, act]);
 
   useEffect(() => {
-    if (!game || game.status !== "handOver" || recordedHand.current === game.handNo) return;
+    if (!game || game.tableMode === "spectator" || game.status !== "handOver" || recordedHand.current === game.handNo) return;
     recordedHand.current = game.handNo;
     const won = game.winners.some((winner) => winner.ids.includes("you"));
     setStats((current) => {
@@ -516,10 +618,14 @@ export default function Home() {
   }, [game, playTone]);
 
   useEffect(() => {
-    if (!settings.autoNext || !game || game.status !== "handOver") return;
-    const timeout = window.setTimeout(() => setGame((current) => current ? startNextHand(current) : current), 2600);
+    if ((!settings.autoNext && game?.tableMode !== "spectator") || spectatorPaused || !game || game.status !== "handOver") return;
+    const timeout = window.setTimeout(() => setGame((current) => current ? startNextHand(current) : current), game.tableMode === "spectator" ? 1800 : 2600);
     return () => window.clearTimeout(timeout);
-  }, [settings.autoNext, game]);
+  }, [settings.autoNext, game, spectatorPaused]);
+
+  // Manual reveals last only for the hand they were taken in: the next deal returns every seat to the default.
+  const currentHandNo = game?.handNo ?? 0;
+  useEffect(() => setPeekedSeats([]), [currentHandNo]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -545,7 +651,12 @@ export default function Home() {
     localStorage.removeItem("pocket-active-session");
     setSavedSession(null);
     setModelAudit([]);
-    setGame(newSession(settings.playerCount));
+    const providers = settings.gameMode === "spectator"
+      ? Object.fromEntries(spectatorSeatProfiles(settings.playerCount).map((seat) => [seat.id, settings.spectatorAiMode === "shared" ? settings.spectatorProvider : settings.spectatorProviders[seat.id] || "local"]))
+      : {};
+    setSpectatorPaused(false);
+    setPeekedSeats([]);
+    setGame(settings.gameMode === "spectator" ? newSpectatorSession(settings.playerCount, providers) : newSession(settings.playerCount));
     setPanel(null); setShowRaise(false); recordedHand.current = 0;
   };
 
@@ -554,12 +665,17 @@ export default function Home() {
     setSavedSession(null);
     setModelAudit([]);
     setGame(null);
+    setSpectatorPaused(false);
+    setPeekedSeats([]);
+    setAiThinkingId(null);
+    setModelThinkingId(null);
     setPanel(null); setLogOpen(false); setShowRaise(false); recordedHand.current = 0;
   };
 
   const resumeSession = () => {
     if (!savedSession) return;
     if (savedSession.game.status === "handOver") recordedHand.current = savedSession.game.handNo;
+    setSpectatorPaused(false);
     setGame(savedSession.game);
     setSavedSession(null);
   };
@@ -580,19 +696,32 @@ export default function Home() {
       return;
     }
     setSettings((current) => ({ ...current, modelProvider: selected.id, modelAiEnabled: true }));
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), selected.id === "minimax" ? 245_000 : 185_000);
     setTestingModel(true);
     setModelStatus({ tone: "working", text: `正在连接 ${selected.name} · ${selected.model}` });
     try {
-      const result = await requestModelDecision(selected.id, MODEL_TEST_CONTEXT, settings.maxReasoning ? "max" : "standard", controller.signal);
-      if (!["fold", "checkCall", "raise", "allIn"].includes(String(result.action))) throw new Error("模型返回的动作无效");
-      setModelStatus({ tone: "ready", text: `连接成功 · ${result.model || selected.model}` });
+      const model = await probeModel(selected, settings.maxReasoning ? "max" : "standard");
+      setModelStatus({ tone: "ready", text: `连接成功 · ${model}` });
     } catch (error) {
       setModelStatus({ tone: "fallback", text: `连接失败：${safeModelError(error)}` });
     } finally {
-      window.clearTimeout(timeout);
       setTestingModel(false);
+    }
+  };
+
+  // Spectator seats run the same probe as the local card, keyed by provider so every seat shows its own result.
+  const testProvider = async (providerId: string) => {
+    if (!providerId || providerId === "local") return;
+    const selected = modelOptions.find((item) => item.id === providerId);
+    if (!selected?.configured) {
+      setProviderTests((current) => ({ ...current, [providerId]: { tone: "fallback", text: selected?.hint || "请先在 .env.local 配置模型" } }));
+      return;
+    }
+    setProviderTests((current) => ({ ...current, [providerId]: { tone: "working", text: `正在连接 ${selected.name} · ${selected.model}` } }));
+    try {
+      const model = await probeModel(selected, settings.maxReasoning ? "max" : "standard");
+      setProviderTests((current) => ({ ...current, [providerId]: { tone: "ready", text: `连接成功 · ${model}` } }));
+    } catch (error) {
+      setProviderTests((current) => ({ ...current, [providerId]: { tone: "fallback", text: `连接失败：${safeModelError(error)}` } }));
     }
   };
 
@@ -602,18 +731,24 @@ export default function Home() {
 
   if (onlineOpen) return <OnlineExperience capacity={settings.playerCount} turnTime={settings.turnTime} modelOptions={modelOptions} selectedModel={settings.modelAiEnabled ? settings.modelProvider : ""} maxReasoning={settings.maxReasoning} onExit={() => setOnlineOpen(false)} />;
 
-  if (!game) return <Lobby settings={settings} stats={stats} savedSession={savedSession} modelOptions={modelOptions} modelStatus={modelStatus} testingModel={testingModel} onSelectModel={selectModel} onSetting={updateSetting} onStart={startSession} onResume={resumeSession} />;
+  if (!game) return <Lobby settings={settings} stats={stats} savedSession={savedSession} modelOptions={modelOptions} modelStatus={modelStatus} testingModel={testingModel} providerTests={providerTests} onTestProvider={testProvider} onSelectModel={selectModel} onSetting={updateSetting} onStart={startSession} onResume={resumeSession} />;
 
-  if (!human) return <main className="loading-screen"><span className="brand-mark">P</span><p>正在整理牌桌…</p></main>;
+  if (!viewer) return <main className="loading-screen"><span className="brand-mark">P</span><p>正在整理牌桌…</p></main>;
 
   const sessionTotal = game.players.reduce((sum, player) => sum + player.chips + player.totalBet, 0);
-  const humanShare = sessionTotal ? Math.round((human.chips / sessionTotal) * 100) : 0;
+  const railSeat = isSpectator
+    ? game.players.reduce((top, player) => player.chips > top.chips ? player : top, game.players[0])
+    : viewer;
+  const humanShare = sessionTotal ? Math.round((railSeat.chips / sessionTotal) * 100) : 0;
   const mainWinner = game.winners[0];
   const blindProgress = getBlindProgress(game);
   const actingPlayer = game.status === "playing" && game.currentPlayer >= 0 ? game.players[game.currentPlayer] : null;
   const winnerIds = new Set(game.winners.flatMap((group) => group.ids));
+  // International practice (TDA 15–17): only players who reach showdown must table their
+  // cards. "全部底牌" and spectator reveal are the opt-in ways to see everything.
+  const revealAllHands = settings.reviewMode === "training" || (isSpectator && settings.spectatorReveal);
   const reviewPlayers = game.players.filter((player) => player.hole.length === 2 && (
-    settings.reviewMode === "training" || player.isHuman || (game.phase === "showdown" && !player.folded)
+    revealAllHands || player.isHuman || peekedSeats.includes(player.id) || (game.phase === "showdown" && !player.folded)
   ));
   const successfulModelCalls = modelAudit.filter((entry) => entry.status === "success").length;
   const fallbackModelCalls = modelAudit.filter((entry) => entry.status === "fallback").length;
@@ -628,7 +763,9 @@ export default function Home() {
           <span className="round-turn-avatar">{actingPlayer?.avatar || "P"}</span>
           <span className="round-turn-copy">
             <small>第 {game.handNo} 手 · {phaseLabel(game.phase)} · {game.players.length} 人桌{actingPlayer ? ` · 剩余 ${timer} 秒` : ""}</small>
-            <strong>{actingPlayer ? actingPlayer.isHuman ? "轮到你操作" : modelThinkingId === actingPlayer.id ? `${actingPlayer.name} 正在调用模型` : `轮到 ${actingPlayer.name} 操作` : game.message}</strong>
+            <strong>{isSpectator
+              ? spectatorPaused ? "观战已暂停" : actingPlayer ? aiThinkingId === actingPlayer.id ? `${actingPlayer.name} 正在思考` : `轮到 ${actingPlayer.name} 操作` : game.message
+              : actingPlayer ? actingPlayer.isHuman ? "轮到你操作" : modelThinkingId === actingPlayer.id ? `${actingPlayer.name} 正在调用模型` : `轮到 ${actingPlayer.name} 操作` : game.message}</strong>
           </span>
           <i className="round-turn-pulse" />
         </div>
@@ -652,15 +789,22 @@ export default function Home() {
 
       <section className="workspace">
         <aside className="session-rail" aria-label="本场进度">
-          <div><small>你的筹码</small><strong>{formatChips(human.chips)}</strong></div>
+          <div><small>{isSpectator ? "筹码领先" : "你的筹码"}</small><strong>{formatChips(railSeat.chips)}</strong></div>
           <div className="stack-meter"><span style={{ width: `${humanShare}%` }} /></div>
-          <p>占场上筹码 {humanShare}%</p>
+          <p>{isSpectator ? `${railSeat.name} 占场上筹码 ${humanShare}%` : `占场上筹码 ${humanShare}%`}</p>
           <button className="text-button" onClick={() => setLogOpen((value) => !value)}><TinyIcon name="history" /> 行动与模型记录</button>
         </aside>
 
         <section className="table-stage" aria-label="德州扑克牌桌">
           <div className="table-grid" />
-          {game.players.map((player, index) => <Seat key={player.id} player={player} index={index} game={game} modelThinking={modelThinkingId === player.id} />)}
+          {game.players.map((player, index) => (
+            <Seat
+              key={player.id} player={player} index={index} game={game}
+              modelThinking={modelThinkingId === player.id} aiThinking={aiThinkingId === player.id}
+              spectator={isSpectator} revealed={settings.spectatorReveal} peeked={peekedSeats.includes(player.id)}
+              onPeek={() => setPeekedSeats((current) => current.includes(player.id) ? current.filter((id) => id !== player.id) : [...current, player.id])}
+            />
+          ))}
 
           <div className="board">
             <div className="pot-line"><span>当前底池</span><strong>{formatChips(pot || game.lastPot)}</strong></div>
@@ -675,30 +819,48 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="hero-hand" aria-label="你的手牌">
-            <div className="hero-cards">
-              <CardView card={human.hole[0]} delay={40} />
-              <CardView card={human.hole[1]} delay={120} />
+          {!isSpectator && (
+            <div className="hero-hand" aria-label="你的手牌">
+              <div className="hero-cards">
+                <CardView card={viewer.hole[0]} delay={40} />
+                <CardView card={viewer.hole[1]} delay={120} />
+              </div>
+              <div className="hand-readout"><small>当前牌型</small><strong>{handLabel}</strong></div>
             </div>
-            <div className="hand-readout"><small>当前牌型</small><strong>{handLabel}</strong></div>
-          </div>
+          )}
+
+          {isSpectator && spectatorPaused && <div className="spectator-paused-overlay" role="status"><strong>观战已暂停</strong><span>点击底部的“继续观战”恢复 AI 行动</span></div>}
 
           {game.status === "handOver" && (
             <div className="result-card has-review" role="status">
               <span className="result-kicker">本手结束</span>
               <h2>{game.message}</h2>
               <p>{mainWinner ? `${mainWinner.label} · 底池 ${formatChips(game.lastPot)}` : "底池已结算"}</p>
-              <section className="hand-review" aria-label="本手所有底牌复盘">
-                <header><strong>本手底牌复盘</strong><small>{settings.reviewMode === "training" ? "训练复盘 · 展示全部底牌" : "标准亮牌 · 仅显示你的牌与摊牌玩家"}</small></header>
+              <section className="hand-review" aria-label="本手公共牌与底牌复盘">
+                <header><strong>本手复盘</strong><small>{revealAllHands ? "展示全部底牌" : "国际赛制 · 只有进入摊牌的玩家亮牌"}</small></header>
+                <div className="review-board" aria-label="本手公共牌">
+                  <small>公共牌</small>
+                  <div className="review-board-cards">
+                    {game.community.length
+                      ? game.community.map((card) => <ReviewCardCode card={card} key={card.id} />)
+                      : <em>本手未发出公共牌</em>}
+                  </div>
+                </div>
                 <div className="hand-review-grid">
                   {reviewPlayers.map((player) => {
-                    const label = game.community.length >= 3
-                      ? evaluateBest([...player.hole, ...game.community]).label
-                      : preflopLabel(player.hole);
+                    const best = game.community.length >= 3 ? evaluateBest([...player.hole, ...game.community]) : null;
+                    const label = best ? best.label : preflopLabel(player.hole);
                     return (
                       <article className={`${player.folded ? "folded" : ""} ${winnerIds.has(player.id) ? "winner" : ""}`} key={player.id}>
                         <span>{player.avatar}</span>
-                        <div><strong>{player.name}</strong><div className="review-hole-cards">{player.hole.map((card) => <ReviewCardCode card={card} key={card.id} />)}</div><small>{label} · {winnerIds.has(player.id) ? "赢得底池" : player.folded ? "已弃牌" : "参与摊牌"}</small></div>
+                        <div>
+                          <strong>{player.name}</strong>
+                          <div className="review-hole-cards">{player.hole.map((card) => <ReviewCardCode card={card} key={card.id} />)}</div>
+                          {best && best.cards.length === 5 && (
+                            <div className="review-best-five"><small>成牌</small>{best.cards.map((card) => <ReviewCardCode card={card} key={`best-${card.id}`} />)}</div>
+                          )}
+                          <small>{label} · {winnerIds.has(player.id) ? "赢得底池" : player.folded ? "已弃牌" : "参与摊牌"}</small>
+                        </div>
                       </article>
                     );
                   })}
@@ -713,8 +875,10 @@ export default function Home() {
             <div className="result-card" role="status">
               <span className="result-kicker">对局结束</span>
               <h2>{game.message}</h2>
-              <p>共完成 {stats.hands} 手牌，胜率 {stats.hands ? Math.round(stats.wins / stats.hands * 100) : 0}%</p>
-              <button className="primary-button" onClick={returnToLobby}>准备新对局</button>
+              <p>{isSpectator
+                ? `本场观战共 ${game.handNo} 手牌 · 最大底池 ${formatChips(Math.max(game.lastPot, ...(game.revealedHands || []).map((entry) => entry.pot), 0))}`
+                : `共完成 ${stats.hands} 手牌，胜率 ${stats.hands ? Math.round(stats.wins / stats.hands * 100) : 0}%`}</p>
+              <button className="primary-button" onClick={returnToLobby}>{isSpectator ? "返回大厅" : "准备新对局"}</button>
             </div>
           )}
         </section>
@@ -764,36 +928,52 @@ export default function Home() {
         </aside>
       </section>
 
-      <section className={`control-dock ${isHumanTurn ? "dock-your-turn" : "dock-waiting"}`} aria-label="行动控制">
-        <div className="dock-context" aria-label="本手决策信息">
-          <span className="timer-ring" style={{ "--progress": `${timer / settings.turnTime * 360}deg` } as React.CSSProperties}><i>{game.status === "playing" ? timer : "·"}</i></span>
-          <div>
-            <small>{isHumanTurn ? `决策时间 · ${timer} 秒` : actingPlayer ? `${actingPlayer.name} 行动 · ${timer} 秒` : `第 ${game.handNo} 手 · ${phaseLabel(game.phase)}`}</small>
-            <strong>{isHumanTurn ? `${handLabel} · ${due === 0 ? "可以过牌" : `待跟注 ${formatChips(Math.min(due, human.chips))}`}` : `${handLabel} · 筹码 ${formatChips(human.chips)}`}</strong>
-          </div>
-        </div>
-
-        <div className="action-area">
-          {showRaise && bounds.max > bounds.min && (
-            <div className="raise-popover">
-              <div className="raise-head"><span>加注到</span><strong>{formatChips(raiseTo)}</strong></div>
-              <input aria-label="加注金额" type="range" min={bounds.min} max={bounds.max} step={10} value={raiseTo} onChange={(event) => setRaiseTo(Number(event.target.value))} />
-              <div className="quick-bets">
-                <button onClick={() => setRaiseTo(Math.min(bounds.max, Math.max(bounds.min, Math.round(pot * .5 / 10) * 10)))}>½ 底池</button>
-                <button onClick={() => setRaiseTo(Math.min(bounds.max, Math.max(bounds.min, Math.round(pot * .75 / 10) * 10)))}>¾ 底池</button>
-                <button onClick={() => setRaiseTo(Math.min(bounds.max, Math.max(bounds.min, pot)))}>满池</button>
-                <button onClick={() => setRaiseTo(bounds.max)}>全下</button>
-              </div>
-              <button className="confirm-raise" onClick={() => act(raiseTo >= bounds.max ? { type: "allIn" } : { type: "raise", amount: raiseTo })}>确认加注</button>
+      {isSpectator ? (
+        <section className={`control-dock spectator-dock ${spectatorPaused ? "is-paused" : ""}`} aria-label="观战控制">
+          <div className="dock-context" aria-label="观战状态">
+            <span className="timer-ring" style={{ "--progress": `${timer / settings.turnTime * 360}deg` } as React.CSSProperties}><i>{spectatorPaused ? "Ⅱ" : game.status === "playing" ? timer : "·"}</i></span>
+            <div>
+              <small>{spectatorPaused ? "观战已暂停" : actingPlayer ? `${actingPlayer.name} 行动 · ${timer} 秒` : `第 ${game.handNo} 手 · ${phaseLabel(game.phase)}`}</small>
+              <strong>{spectatorPaused ? "AI 不会继续行动" : actingPlayer ? `${actingPlayer.name} 正在思考` : game.status === "handOver" ? "准备下一手" : game.message}</strong>
             </div>
-          )}
-          <div className="action-row">
-            <button disabled={!isHumanTurn} className="action-button quiet" onClick={() => act({ type: "fold" })}>弃牌 <kbd>F</kbd></button>
-            <button disabled={!isHumanTurn} className="action-button quiet" onClick={() => act({ type: "checkCall" })}>{due === 0 ? "过牌" : `跟注 ${formatChips(Math.min(due, human.chips))}`} <kbd>C</kbd></button>
-            <button disabled={!isHumanTurn || bounds.max <= game.currentBet} className={`action-button dark ${showRaise ? "selected" : ""}`} onClick={() => { if (!showRaise) setRaiseTo(defaultRaise); setShowRaise((value) => !value); }}>加注 <kbd>R</kbd></button>
           </div>
-        </div>
-      </section>
+          <div className="spectator-control-row">
+            <button className="action-button dark" onClick={() => setSpectatorPaused((value) => !value)}>{spectatorPaused ? "继续观战" : "暂停观战"}</button>
+            <button className="action-button quiet" onClick={returnToLobby}>结束观战</button>
+          </div>
+        </section>
+      ) : (
+        <section className={`control-dock ${isHumanTurn ? "dock-your-turn" : "dock-waiting"}`} aria-label="行动控制">
+          <div className="dock-context" aria-label="本手决策信息">
+            <span className="timer-ring" style={{ "--progress": `${timer / settings.turnTime * 360}deg` } as React.CSSProperties}><i>{game.status === "playing" ? timer : "·"}</i></span>
+            <div>
+              <small>{isHumanTurn ? `决策时间 · ${timer} 秒` : actingPlayer ? `${actingPlayer.name} 行动 · ${timer} 秒` : `第 ${game.handNo} 手 · ${phaseLabel(game.phase)}`}</small>
+              <strong>{isHumanTurn ? `${handLabel} · ${due === 0 ? "可以过牌" : `待跟注 ${formatChips(Math.min(due, human?.chips || 0))}`}` : `${handLabel} · 筹码 ${formatChips(human?.chips || 0)}`}</strong>
+            </div>
+          </div>
+
+          <div className="action-area">
+            {showRaise && bounds.max > bounds.min && (
+              <div className="raise-popover">
+                <div className="raise-head"><span>加注到</span><strong>{formatChips(raiseTo)}</strong></div>
+                <input aria-label="加注金额" type="range" min={bounds.min} max={bounds.max} step={10} value={raiseTo} onChange={(event) => setRaiseTo(Number(event.target.value))} />
+                <div className="quick-bets">
+                  <button onClick={() => setRaiseTo(Math.min(bounds.max, Math.max(bounds.min, Math.round(pot * .5 / 10) * 10)))}>½ 底池</button>
+                  <button onClick={() => setRaiseTo(Math.min(bounds.max, Math.max(bounds.min, Math.round(pot * .75 / 10) * 10)))}>¾ 底池</button>
+                  <button onClick={() => setRaiseTo(Math.min(bounds.max, Math.max(bounds.min, pot)))}>满池</button>
+                  <button onClick={() => setRaiseTo(bounds.max)}>全下</button>
+                </div>
+                <button className="confirm-raise" onClick={() => act(raiseTo >= bounds.max ? { type: "allIn" } : { type: "raise", amount: raiseTo })}>确认加注</button>
+              </div>
+            )}
+            <div className="action-row">
+              <button disabled={!isHumanTurn} className="action-button quiet" onClick={() => act({ type: "fold" })}>弃牌 <kbd>F</kbd></button>
+              <button disabled={!isHumanTurn} className="action-button quiet" onClick={() => act({ type: "checkCall" })}>{due === 0 ? "过牌" : `跟注 ${formatChips(Math.min(due, human?.chips || 0))}`} <kbd>C</kbd></button>
+              <button disabled={!isHumanTurn || bounds.max <= game.currentBet} className={`action-button dark ${showRaise ? "selected" : ""}`} onClick={() => { if (!showRaise) setRaiseTo(defaultRaise); setShowRaise((value) => !value); }}>加注 <kbd>R</kbd></button>
+            </div>
+          </div>
+        </section>
+      )}
 
       {panel && (
         <div className="modal-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setPanel(null)}>
@@ -803,17 +983,18 @@ export default function Home() {
               <>
                 <span className="modal-kicker">偏好</span><h2 id="modal-title">游戏设置</h2>
                 <div className="settings-section">
-                  <div className="settings-section-title"><strong>对手决策</strong><small>本地 AI 始终使用最高强度</small></div>
+                  <div className="settings-section-title"><strong>对手决策</strong><small>{isSpectator ? "观战席位按开局配置的模型行动" : "本地 AI 会按下面的开关调整模拟预算"}</small></div>
                   <div className="setting-group modal-pace"><span className="setting-label">行动时限</span><div className="segment-control">
                     {([30, 120, 300] as TurnTime[]).map((value) => <button key={value} className={settings.turnTime === value ? "active" : ""} onClick={() => updateSetting("turnTime", value)}>{value} 秒</button>)}
                   </div><small>{settings.turnTime === 30 ? "参考 TDA 叫钟：25 秒行动，加最后 5 秒倒数。" : settings.turnTime === 120 ? "所有玩家统一 120 秒，适合大多数深度思考。" : "所有玩家统一 300 秒，为长时间极致思考保留空间。"}</small></div>
-                  <Toggle label="模型极致思考" detail="开启时使用最高推理档；关闭后仍保持充分思考，只降低等待与消耗" checked={settings.maxReasoning} onChange={(value) => updateSetting("maxReasoning", value)} />
+                  <Toggle label="模型极致思考" detail="外部模型发送最高推理档；本地 AI 开启时提高模拟预算并降低随机噪声" checked={settings.maxReasoning} onChange={(value) => updateSetting("maxReasoning", value)} />
                 </div>
                 <div className="settings-section">
-                  <div className="settings-section-title"><strong>复盘</strong><small>只影响结算后的底牌展示</small></div>
-                  <div className="setting-group"><span className="setting-label">亮牌方式</span><div className="segment-control">
-                    {(["training", "standard"] as ReviewMode[]).map((value) => <button key={value} className={settings.reviewMode === value ? "active" : ""} onClick={() => updateSetting("reviewMode", value)}>{value === "training" ? "训练复盘" : "标准亮牌"}</button>)}
-                  </div><small>{settings.reviewMode === "training" ? "结算后展示所有底牌，适合学习对手线路。" : "仅展示你的牌和进入摊牌的玩家，更接近正式牌桌。"}</small></div>
+                  <div className="settings-section-title"><strong>亮牌与复盘</strong><small>默认与国际比赛一致</small></div>
+                  <div className="setting-group"><span className="setting-label">结算亮牌</span><div className="segment-control">
+                    {(["standard", "training"] as ReviewMode[]).map((value) => <button key={value} className={settings.reviewMode === value ? "active" : ""} onClick={() => updateSetting("reviewMode", value)}>{value === "standard" ? "国际赛制" : "全部底牌"}</button>)}
+                  </div><small>{settings.reviewMode === "standard" ? "按 TDA 规则：进入摊牌的玩家必须亮牌，弃牌与靠他人弃牌获胜的手牌不亮。" : "结算后展示所有底牌与公共牌，适合学习对手线路。"}</small></div>
+                  {isSpectator && <Toggle label="观战全程亮牌" detail="关闭后牌桌只显示暗牌；无论开关如何，点击某个座位的牌都能单独展开或收起这一手" checked={settings.spectatorReveal} onChange={(value) => updateSetting("spectatorReveal", value)} />}
                 </div>
                 <div className="settings-section">
                   <div className="settings-section-title"><strong>流程与界面</strong><small>无限注德州 · 10 / 20 起始盲注</small></div>
@@ -843,7 +1024,7 @@ export default function Home() {
                   <div><strong>{formatChips(stats.biggestPot)}</strong><span>最大底池</span></div>
                   <div><strong>{stats.bestStreak}</strong><span>最长连胜</span></div>
                 </div>
-                <p className="privacy-note">数据只保存在你的浏览器中，不会上传。</p>
+                <p className="privacy-note">{isSpectator ? "AI 观战不计入本机记录，这里仍是你自己对局的数据。" : "数据只保存在你的浏览器中，不会上传。"}</p>
               </>
             )}
           </section>
@@ -854,13 +1035,15 @@ export default function Home() {
   );
 }
 
-function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testingModel, onSelectModel, onSetting, onStart, onResume }: {
+function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testingModel, providerTests, onTestProvider, onSelectModel, onSetting, onStart, onResume }: {
   settings: Settings;
   stats: Stats;
   savedSession: SavedSession | null;
   modelOptions: ModelOption[];
   modelStatus: ModelStatus;
   testingModel: boolean;
+  providerTests: Record<string, ModelStatus>;
+  onTestProvider: (providerId: string) => Promise<void>;
   onSelectModel: (providerId: string | null) => Promise<void>;
   onSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
   onStart: () => void;
@@ -868,9 +1051,50 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
 }) {
   const winRate = stats.hands ? Math.round(stats.wins / stats.hands * 100) : 0;
   const [modelPanelOpen, setModelPanelOpen] = useState(false);
+  const [spectatorPanelOpen, setSpectatorPanelOpen] = useState(false);
+  // Which seat's model list is open inside the spectator popover; "shared" is the one-for-all row.
+  const [spectatorEditing, setSpectatorEditing] = useState<string | null>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
+  const spectatorPickerRef = useRef<HTMLDivElement>(null);
   const provider = modelOptions.find((item) => item.id === settings.modelProvider) || modelOptions[0] || DEFAULT_MODEL_OPTIONS[0];
   const availableModels = modelOptions.filter((item) => item.configured);
+  const spectatorSeats = spectatorSeatProfiles(settings.playerCount);
+  const localChoice: ModelChoice = { id: "local", name: "本地 AI", model: settings.maxReasoning ? "极致模拟" : "标准模拟", mark: "P" };
+  const spectatorChoices: ModelChoice[] = [localChoice, ...availableModels];
+  const spectatorSharedProvider = modelDisplayName(settings.spectatorProvider, modelOptions);
+  // The card keeps one line, so per-seat mode lists the distinct sources instead of every seat.
+  const spectatorSources = spectatorSeats
+    .map((seat) => modelDisplayName(settings.spectatorProviders[seat.id] || "local", modelOptions))
+    .filter((name, index, list) => list.indexOf(name) === index);
+  const spectatorSummary = settings.spectatorAiMode === "shared"
+    ? `全部 ${settings.playerCount} 席都调用 ${spectatorSharedProvider}`
+    : `${settings.playerCount} 席分别指定 · ${spectatorSources.join(" / ")}`;
+  const editingSeat = spectatorSeats.find((seat) => seat.id === spectatorEditing);
+  // The external providers this configuration actually calls; local seats need no connection test.
+  const spectatorProviderIds = (settings.spectatorAiMode === "shared"
+    ? [settings.spectatorProvider]
+    : spectatorSeats.map((seat) => settings.spectatorProviders[seat.id] || "local"))
+    .filter((id) => id && id !== "local")
+    .filter((id, index, list) => list.indexOf(id) === index);
+  const spectatorTests = spectatorProviderIds.map((id) => providerTests[id]);
+  const spectatorTesting = spectatorTests.some((test) => test?.tone === "working");
+  // A running test outranks a failure, a failure outranks an untested seat, and only an all-clear reads 已连接.
+  const spectatorTone: ModelStatus["tone"] = spectatorTesting
+    ? "working"
+    : spectatorTests.some((test) => test?.tone === "fallback") ? "fallback"
+      : spectatorProviderIds.length && spectatorTests.every((test) => test?.tone === "ready") ? "ready" : "idle";
+  const spectatorCardStatus = !spectatorProviderIds.length
+    ? "本地"
+    : spectatorTesting ? "检测中" : spectatorTone === "fallback" ? "不可用" : spectatorTone === "ready" ? "已连接" : "待检测";
+  const spectatorStatusText = !spectatorProviderIds.length
+    ? "全部席位都使用本地 AI，无需连接测试。"
+    : spectatorProviderIds.length === 1
+      ? providerTests[spectatorProviderIds[0]]?.text || `${modelDisplayName(spectatorProviderIds[0], modelOptions)} 尚未检测，可点击“检测连接”。`
+      : spectatorProviderIds.map((id) => `${modelDisplayName(id, modelOptions)}：${providerTests[id]?.text || "尚未检测"}`).join("；");
+  const seatTestTone = (id: string) => id === "local" ? "local" : providerTests[id]?.tone || "untested";
+  const seatTestLabel = (id: string) => id === "local"
+    ? "本地 AI，无需连接测试"
+    : `${modelDisplayName(id, modelOptions)}：${providerTests[id]?.text || "尚未检测"}`;
   const timeLabel = `${settings.turnTime} 秒行动`;
   const modelCardStatus = testingModel
     ? "检测中"
@@ -888,6 +1112,16 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
   }, [modelPanelOpen]);
+  useEffect(() => {
+    if (!spectatorPanelOpen) return;
+    const close = (event: PointerEvent) => {
+      if (spectatorPickerRef.current?.contains(event.target as Node)) return;
+      setSpectatorPanelOpen(false);
+      setSpectatorEditing(null);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [spectatorPanelOpen]);
   const chooseModel = async (providerId: string | null) => {
     if (!providerId) setModelPanelOpen(false);
     await onSelectModel(providerId);
@@ -897,15 +1131,15 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
       <header className="topbar lobby-topbar">
         <span className="brand"><span className="brand-mark">P</span><span className="brand-word">POCKET</span></span>
         <span className="lobby-status"><i /> 对局尚未开始</span>
-        <div className="top-actions"><span className="local-badge">{settings.gameMode === "online" ? "虚拟筹码 · 私人房" : "仅在本机运行"}</span></div>
+        <div className="top-actions"><span className="local-badge">{settings.gameMode === "online" ? "虚拟筹码 · 私人房" : settings.gameMode === "spectator" ? "AI 观战 · 仅在本机运行" : "仅在本机运行"}</span></div>
       </header>
       <section className="lobby-main">
         <div className="lobby-page">
           <div className="lobby-intro">
             <div className="lobby-intro-copy">
-              <span className="modal-kicker">POCKET / {settings.gameMode === "online" ? "私人联机" : "本地牌局"}</span>
+              <span className="modal-kicker">POCKET / {settings.gameMode === "online" ? "私人联机" : settings.gameMode === "spectator" ? "AI 观战" : "本地牌局"}</span>
               <h1>安静地，打一手好牌。</h1>
-              <p>{settings.gameMode === "online" ? "创建私人房间，或使用六位房间码加入朋友的牌桌。" : "确认本场偏好。只有点击开始后，牌局才会正式创建。"}</p>
+              <p>{settings.gameMode === "online" ? "创建私人房间，或使用六位房间码加入朋友的牌桌。" : settings.gameMode === "spectator" ? "配置 AI 席位后开始观战，随时暂停或结束这场牌局。" : "确认本场偏好。只有点击开始后，牌局才会正式创建。"}</p>
             </div>
             <dl className="lobby-basics" aria-label="固定对局信息">
               <div><dt>规则</dt><dd>无限注德州</dd></div>
@@ -923,17 +1157,18 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                 <div className="setting-group lobby-control-card">
                   <span className="setting-label">对局模式</span>
                   <div className="segment-control">
-                    <button className={settings.gameMode === "local" ? "active" : ""} onClick={() => onSetting("gameMode", "local")}>本地对局</button>
-                    <button className={settings.gameMode === "online" ? "active" : ""} onClick={() => { setModelPanelOpen(false); onSetting("gameMode", "online"); }}>联机对局</button>
+                    <button className={settings.gameMode === "local" ? "active" : ""} onClick={() => { setSpectatorPanelOpen(false); onSetting("gameMode", "local"); }}>本地对局</button>
+                    <button className={settings.gameMode === "spectator" ? "active" : ""} onClick={() => { setModelPanelOpen(false); onSetting("gameMode", "spectator"); }}>AI 观战</button>
+                    <button className={settings.gameMode === "online" ? "active" : ""} onClick={() => { setModelPanelOpen(false); setSpectatorPanelOpen(false); onSetting("gameMode", "online"); }}>联机对局</button>
                   </div>
-                  <small>{settings.gameMode === "online" ? "私人邀请码房，服务端统一发牌和验证行动。" : "牌局与记录只保存在本机。"}</small>
+                  <small>{settings.gameMode === "online" ? "私人邀请码房，服务端统一发牌和验证行动。" : settings.gameMode === "spectator" ? "全桌都是 AI，你只负责观战。" : "牌局与记录只保存在本机。"}</small>
                 </div>
                 <div className="setting-group lobby-control-card lobby-player-count">
                   <span className="setting-label">对局人数</span>
                   <div className="segment-control player-count-control">
                     {([2, 3, 4, 5, 6] as PlayerCount[]).map((value) => <button key={value} className={settings.playerCount === value ? "active" : ""} onClick={() => onSetting("playerCount", value)}>{value} 人</button>)}
                   </div>
-                  <small>{settings.gameMode === "online" ? `房间最多容纳 ${settings.playerCount} 位真人玩家。` : `你与 ${settings.playerCount - 1} 位风格不同的 AI 同桌。`}</small>
+                  <small>{settings.gameMode === "online" ? `房间最多容纳 ${settings.playerCount} 位真人玩家。` : settings.gameMode === "spectator" ? `${settings.playerCount} 位 AI 同桌，自动轮流行动。` : `你与 ${settings.playerCount - 1} 位风格不同的 AI 同桌。`}</small>
                 </div>
                 <div className="setting-group lobby-control-card">
                   <span className="setting-label">行动时限</span>
@@ -942,7 +1177,79 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                   </div>
                   <small>{settings.turnTime === 30 ? "参考 TDA 叫钟：25 秒行动并在最后 5 秒倒数。" : settings.turnTime === 120 ? "每位玩家统一 120 秒，适合大多数深度思考。" : "每位玩家统一 300 秒，为长时间极致思考保留空间。"}</small>
                 </div>
-                {settings.gameMode === "online" ? (
+                {settings.gameMode === "spectator" ? (
+                  <div className={`lobby-model-picker ${spectatorPanelOpen ? "is-open" : ""}`} ref={spectatorPickerRef}>
+                    <div className="lobby-model-card">
+                      <button type="button" className="lobby-model-entry" aria-haspopup="dialog" aria-expanded={spectatorPanelOpen} onClick={() => { setSpectatorEditing(null); setSpectatorPanelOpen((value) => !value); }}>
+                        <span className="lobby-model-symbol">观</span>
+                        <span className="lobby-model-copy"><strong>观战 AI 配置</strong><small>{spectatorSummary}</small></span>
+                        <span className="lobby-model-actions">
+                          <em className={`model-status ${spectatorTone}`}>{spectatorCardStatus}</em>
+                          <span className="lobby-model-open">配置 <b>{spectatorPanelOpen ? "↑" : "↓"}</b></span>
+                        </span>
+                      </button>
+                      <div className="lobby-model-tools">
+                        <button type="button" className={`lobby-model-reasoning-toggle ${settings.maxReasoning ? "is-on" : ""}`} role="switch" aria-checked={settings.maxReasoning} aria-label={`深度思考，当前为${settings.maxReasoning ? "极致" : "充分"}`} onClick={() => onSetting("maxReasoning", !settings.maxReasoning)}>
+                          <b>深度思考</b><i />
+                        </button>
+                      </div>
+                    </div>
+                    {spectatorPanelOpen && (spectatorEditing ? (
+                      <div className="lobby-model-popover spectator-popover" role="listbox" aria-label={`选择${editingSeat ? editingSeat.name : "全部席位"}使用的模型`}>
+                        <div className="lobby-model-popover-head">
+                          <button type="button" className="spectator-popover-back" onClick={() => setSpectatorEditing(null)} aria-label="返回席位列表">←</button>
+                          <strong>{editingSeat ? `${editingSeat.name} 使用的模型` : `全部 ${settings.playerCount} 席使用的模型`}</strong>
+                          <small>选择后自动检测</small>
+                        </div>
+                        <ModelChoiceOptions
+                          choices={spectatorChoices}
+                          value={editingSeat ? settings.spectatorProviders[editingSeat.id] || "local" : settings.spectatorProvider}
+                          onPick={(id) => {
+                            if (editingSeat) onSetting("spectatorProviders", { ...settings.spectatorProviders, [editingSeat.id]: id });
+                            else onSetting("spectatorProvider", id);
+                            setSpectatorEditing(null);
+                            void onTestProvider(id);
+                          }}
+                        />
+                        {availableModels.length === 0 && <p>本地尚未识别到可用模型，请编辑 .env.local 后重启服务。</p>}
+                      </div>
+                    ) : (
+                      <div className="lobby-model-popover spectator-popover" role="dialog" aria-label="配置观战席位使用的 AI">
+                        <div className="lobby-model-popover-head">
+                          <strong>席位 AI 来源</strong>
+                          <button
+                            type="button" className="spectator-retest" disabled={!spectatorProviderIds.length || spectatorTesting}
+                            onClick={() => spectatorProviderIds.forEach((id) => void onTestProvider(id))}
+                          >{spectatorTesting ? "检测中…" : "检测连接"}</button>
+                        </div>
+                        <div className="segment-control spectator-mode-switch">
+                          <button className={settings.spectatorAiMode === "shared" ? "active" : ""} onClick={() => onSetting("spectatorAiMode", "shared")}>统一一个 AI</button>
+                          <button className={settings.spectatorAiMode === "individual" ? "active" : ""} onClick={() => onSetting("spectatorAiMode", "individual")}>每席单独配置</button>
+                        </div>
+                        <div className={`spectator-seat-list ${settings.spectatorAiMode === "shared" ? "is-single" : ""}`}>
+                          {settings.spectatorAiMode === "shared" ? (
+                            <button type="button" className="spectator-seat-row" onClick={() => setSpectatorEditing("shared")} title={seatTestLabel(settings.spectatorProvider)}>
+                              <span><i>全</i>全部 {settings.playerCount} 席</span>
+                              <b className="spectator-seat-value">
+                                <em className={`spectator-seat-dot ${seatTestTone(settings.spectatorProvider)}`} aria-hidden="true" />
+                                <span>{spectatorSharedProvider}</span>
+                              </b>
+                            </button>
+                          ) : spectatorSeats.map((seat) => (
+                            <button type="button" className="spectator-seat-row" key={seat.id} onClick={() => setSpectatorEditing(seat.id)} title={seatTestLabel(settings.spectatorProviders[seat.id] || "local")}>
+                              <span><i>{seat.avatar}</i>{seat.name}</span>
+                              <b className="spectator-seat-value">
+                                <em className={`spectator-seat-dot ${seatTestTone(settings.spectatorProviders[seat.id] || "local")}`} aria-hidden="true" />
+                                <span>{modelDisplayName(settings.spectatorProviders[seat.id] || "local", modelOptions)}</span>
+                              </b>
+                            </button>
+                          ))}
+                        </div>
+                        <p className={`lobby-model-popover-status ${spectatorTone}`} role="status" aria-live="polite">{spectatorStatusText}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : settings.gameMode === "online" ? (
                   <div className="lobby-model-card lobby-online-info-card">
                     <div className="lobby-model-entry">
                       <span className="lobby-model-symbol">联</span>
@@ -970,14 +1277,11 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                   {modelPanelOpen && (
                     <div className="lobby-model-popover" role="listbox" aria-label="选择可用模型">
                       <div className="lobby-model-popover-head"><strong>本场决策模型</strong><small>选择后自动检测连接</small></div>
-                      <button type="button" role="option" aria-selected={!settings.modelAiEnabled} className={!settings.modelAiEnabled ? "selected" : ""} onClick={() => chooseModel(null)}>
-                        <span className="model-choice-mark">P</span><span><b>本地 AI</b><small>无需网络，始终可用</small></span><i>✓</i>
-                      </button>
-                      {availableModels.map((item) => (
-                        <button type="button" role="option" aria-selected={settings.modelAiEnabled && item.id === settings.modelProvider} className={settings.modelAiEnabled && item.id === settings.modelProvider ? "selected" : ""} key={item.id} onClick={() => chooseModel(item.id)}>
-                          <span className="model-choice-mark">{item.name.slice(0, 1)}</span><span><b>{item.name}</b><small>{item.model}</small></span><i>✓</i>
-                        </button>
-                      ))}
+                      <ModelChoiceOptions
+                        choices={[{ ...localChoice, model: "无需网络，始终可用" }, ...availableModels]}
+                        value={settings.modelAiEnabled ? settings.modelProvider : "local"}
+                        onPick={(id) => void chooseModel(id === "local" ? null : id)}
+                      />
                       {!availableModels.length && <p>本地尚未识别到可用模型，请编辑 .env.local 后重启服务。</p>}
                       {availableModels.length > 0 && <p className={`lobby-model-popover-status ${modelStatus.tone}`} role="status" aria-live="polite">{testingModel ? "正在验证本地配置与模型响应…" : modelStatus.text}</p>}
                     </div>
@@ -996,10 +1300,16 @@ function Lobby({ settings, stats, savedSession, modelOptions, modelStatus, testi
                 </div>
               )}
               <div className="lobby-selection-line" aria-label="当前选择">
-                <span>当前选择</span><b>{settings.gameMode === "online" ? "联机对局" : "本地对局"}</b><i /><b>{settings.playerCount} 人</b><i /><b>{timeLabel}</b><i /><b>{settings.gameMode === "online" ? "私人好友房" : settings.modelAiEnabled ? provider.name : "本地 AI · 最高强度"}</b>
+                <span>当前选择</span><b>{gameModeLabel(settings.gameMode)}</b><i /><b>{settings.playerCount} {settings.gameMode === "spectator" ? "席" : "人"}</b><i /><b>{timeLabel}</b><i /><b>{settings.gameMode === "online"
+                  ? "私人好友房"
+                  : settings.gameMode === "spectator"
+                    ? settings.spectatorAiMode === "shared" ? `全席 ${spectatorSharedProvider}` : "逐席位配置"
+                    : settings.modelAiEnabled ? provider.name : `本地 AI · ${settings.maxReasoning ? "极致" : "充分"}`}</b>
               </div>
               {settings.gameMode === "local" ? <div className="lobby-history" aria-label="本机历史记录">
                 <span>本机记录</span><b>{stats.hands} 手牌</b><i /><b>{winRate}% 胜率</b><i /><b>最大 {formatChips(stats.biggestPot)}</b>
+              </div> : settings.gameMode === "spectator" ? <div className="lobby-history" aria-label="观战说明">
+                <span>观战功能</span><b>可暂停 / 继续</b><i /><b>全程亮牌可关闭</b><i /><b>每席一个 skill</b>
               </div> : <div className="lobby-history" aria-label="联机保护"><span>联机保护</span><b>服务端发牌</b><i /><b>行动校验</b><i /><b>断线恢复</b></div>}
             </div>
             <div className="lobby-launch">

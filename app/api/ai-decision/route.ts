@@ -175,16 +175,17 @@ function modelPayload(config: ServerModelConfig, contextText: string, compatibil
     skillBlock,
     "你是一名德州扑克对手，只能根据提供的公开牌局信息和自己的底牌决策。",
     "不得假设其他玩家的隐藏底牌。结合位置、筹码、底池赔率、牌力、对手行动和角色性格。",
+    "输入中的 players[].decisionClock 是各座位真实的思考用时，revealedHistory 是按国际赛制在每手结束时已在牌桌上公开的底牌与公共牌；两者都是合法的公开信息，可用于修正对手范围与倾向，但不得据此断言任何仍未公开的底牌。",
     "输入中 role.skill 与 skillExecution 是该对手必须遵守的完整专属技能。严格按 skillExecution.applyInOrder 执行；先读 guardrails 与 decisionProtocol，再读 priorityOrder、当前街规则、decisionMatrix、sizing 和 outputChecklist，不得只读取 title 或 summary。",
     "必须在最终 JSON 中回填 skillId（等于 skillExecution.skillId）、skillRulesUsed（至少列出一条实际采用的规则标识或原文摘要）和 skillApplication（说明该规则如何改变动作）。这三个字段用于核验模型确实使用了专属 skill。",
     "以 objective 为长期目标，选择与当前局面相关的规则。skillApplication 必须明确指出本次实际采用的角色规则及其对动作的影响，不得只复述角色名称。",
-    "本游戏没有低难度档。输入中的 competitiveProfile 表示固定最高竞技强度；不得故意犯错，完整考虑范围、组合、阻断牌、位置、SPR、底池赔率和行动线路，以长期期望值最大化。",
+    "本游戏没有低难度档。输入中的 competitiveProfile 表示本次要求的竞技强度（maximum 或 standard）；无论哪一档都不得故意犯错，需完整考虑范围、组合、阻断牌、位置、SPR、底池赔率和行动线路，以长期期望值最大化。",
     requestedReasoning === "max" ? "本次启用极致思考：在内部尽可能充分验证候选动作、反例和尺度后再回答。" : "本次使用标准思考：保持严谨，但优先在合理延迟内完成决策。",
     "输入中的 actionDeadlineSeconds 是本次行动的硬性总时限。你必须自行分配思考与作答时间，并在该秒数内返回完整、合法的 JSON；超时会被自动判定为模型决策失败。",
     "必须从 legalActions 中选择合法动作。raise 时 amount 必须位于 minRaiseTo 与 maxRaiseTo 之间。",
     "在内部充分推理后再作答，但不要在最终 JSON 中输出隐藏思维链或逐步内心推演。最终答案可以简洁；用关键结论证明决策即可，不以最终文字长度代替推理质量。",
     "除 action 的英文枚举值外，所有文本字段必须使用简体中文。",
-    "只返回一个 JSON 对象，不要 Markdown 或额外文字。严格使用：{\"action\":\"fold|checkCall|raise|allIn\",\"amount\":数字或null,\"note\":\"动作摘要\",\"assessment\":\"牌力结论\",\"rangeAnalysis\":\"范围与位置结论\",\"potAnalysis\":\"赔率、SPR与尺度结论\",\"factors\":[\"2至4项关键公开因素\"],\"alternatives\":[{\"action\":\"主要候选动作\",\"reason\":\"未选择原因\"}],\"skillId\":\"skillExecution.skillId\",\"skillRulesUsed\":[\"实际使用的规则\"],\"skillApplication\":\"采用的角色规则\",\"strengthApplication\":\"最高竞技强度的具体体现\",\"risk\":\"主要风险与不确定性\",\"confidence\":0到100的整数}。各分析字段优先使用一到两句完整短句。",
+    "只返回一个 JSON 对象，不要 Markdown 或额外文字。严格使用：{\"action\":\"fold|checkCall|raise|allIn\",\"amount\":数字或null,\"note\":\"动作摘要\",\"assessment\":\"牌力结论\",\"rangeAnalysis\":\"范围与位置结论\",\"potAnalysis\":\"赔率、SPR与尺度结论\",\"factors\":[\"2至4项关键公开因素\"],\"alternatives\":[{\"action\":\"主要候选动作\",\"reason\":\"未选择原因\"}],\"skillId\":\"skillExecution.skillId\",\"skillRulesUsed\":[\"实际使用的规则\"],\"skillApplication\":\"采用的角色规则\",\"strengthApplication\":\"本次竞技强度的具体体现\",\"risk\":\"主要风险与不确定性\",\"confidence\":0到100的整数}。各分析字段优先使用一到两句完整短句。",
   ].join("\n");
 
   if (config.adapter === "minimax") {

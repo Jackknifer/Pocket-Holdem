@@ -122,7 +122,7 @@ function applyExpiredTurn(room: RoomRecord): RoomRecord {
   const actor = room.game.players[room.game.currentPlayer];
   if (!actor) return room;
   const due = Math.max(0, room.game.currentBet - actor.bet);
-  room.game = applyAction(room.game, actor.id, due === 0 ? { type: "checkCall" } : { type: "fold" });
+  room.game = applyAction(room.game, actor.id, due === 0 ? { type: "checkCall" } : { type: "fold" }, room.turnTime);
   room.aiTurn = null;
   room.version += 1;
   room.message = `${actor.name} 行动超时，已${due === 0 ? "自动过牌" : "自动弃牌"}`;
@@ -349,7 +349,8 @@ export function applyMessage(room: RoomRecord, member: RoomMemberRecord, message
     if (!actor || actor.id !== member.id) throw new RoomRequestError(409, "现在还没有轮到你");
     const action = cleanAction(message.action);
     if (!action) throw new RoomRequestError(400, "这个操作不合法");
-    room.game = applyAction(room.game, member.id, action);
+    const spent = room.deadlineAt ? room.turnTime - (room.deadlineAt - Date.now()) / 1000 : undefined;
+    room.game = applyAction(room.game, member.id, action, spent);
     room.aiTurn = null;
     room.recentActionIds = [...room.recentActionIds, actionId].slice(-80);
     room.version += 1;
@@ -413,7 +414,7 @@ async function requestBotModel(room: RoomRecord, bot: RoomMemberRecord, environm
     headers: { "content-type": "application/json", "x-pocket-internal": "online-bot" },
     body: JSON.stringify({
       provider: bot.modelProvider,
-      context: buildModelContext(room.game, actor, room.turnTime, bot.skillId),
+      context: buildModelContext(room.game, actor, room.turnTime, bot.skillId, { maxReasoning: room.maxReasoning }),
       reasoning: room.maxReasoning ? "max" : "standard",
       actionTimeSeconds: modelRequestSeconds,
     }),
@@ -431,8 +432,9 @@ async function finishBotTurn(db: D1Database, code: string, lease: AiTurnLease, d
     if (!bot || room.version !== lease.gameVersion || room.aiTurn?.leaseId !== lease.leaseId || !room.game) return stored;
     const actor = room.game.players[room.game.currentPlayer];
     const modelAction = decision ? normalizeModelAction(room.game, actor, decision) : null;
-    const action = modelAction || chooseAiAction(room.game, actor);
-    room.game = applyAction(room.game, actor.id, action);
+    const action = modelAction || chooseAiAction(room.game, actor, { maxReasoning: room.maxReasoning });
+    const thinkingSeconds = lease.startedAt ? (Date.now() - lease.startedAt) / 1000 : undefined;
+    room.game = applyAction(room.game, actor.id, action, thinkingSeconds);
     room.aiTurn = null;
     room.version += 1;
     room.message = room.game.message;

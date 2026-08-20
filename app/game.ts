@@ -2,6 +2,7 @@ export type Suit = "s" | "h" | "d" | "c";
 export type Rank = 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14;
 export type Phase = "preflop" | "flop" | "turn" | "river" | "showdown";
 export type GameStatus = "playing" | "handOver" | "gameOver";
+export type TableMode = "local" | "spectator" | "online";
 
 export interface Card {
   suit: Suit;
@@ -19,6 +20,8 @@ export interface Player {
   folded: boolean;
   allIn: boolean;
   isHuman: boolean;
+  /** Model id used by an AI seat in spectator mode; `local` is the built-in strategy. */
+  aiProvider?: string;
   avatar: string;
   note: string;
   aggression: number;
@@ -37,8 +40,29 @@ export interface LogEntry {
   tone?: "muted" | "strong";
 }
 
+/** Time a seat actually spent on its decisions: this hand, plus a session average. */
+export interface DecisionTiming {
+  last: number;
+  hand: number[];
+  total: number;
+  samples: number;
+}
+
+/**
+ * Cards that became public information at the end of a hand. Tournament practice
+ * (TDA rules 15–17) only exposes the hands still contesting the pot at showdown,
+ * so a hand won by folds records an empty `reveals` list.
+ */
+export interface RevealedHand {
+  handNo: number;
+  reachedShowdown: boolean;
+  board: string[];
+  pot: number;
+  reveals: Array<{ id: string; name: string; hole: string[]; label: string; won: boolean }>;
+}
+
 export interface GameState {
-  tableMode?: "local" | "online";
+  tableMode?: TableMode;
   players: Player[];
   deck: Card[];
   community: Card[];
@@ -58,6 +82,10 @@ export interface GameState {
   message: string;
   log: LogEntry[];
   lastPot: number;
+  /** Per-seat decision clock, keyed by player id. */
+  decisionTiming?: Record<string, DecisionTiming>;
+  /** Most recent hands whose cards were revealed at the table, newest first. */
+  revealedHands?: RevealedHand[];
 }
 
 export type GameAction =
@@ -75,6 +103,11 @@ export const rankLabel: Record<Rank, string> = {
   2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10",
   11: "J", 12: "Q", 13: "K", 14: "A",
 };
+
+/** Compact table notation for one card, e.g. `A♠`. */
+export function cardCode(card: Card): string {
+  return `${rankLabel[card.rank]}${suitSymbol[card.suit]}`;
+}
 
 export type LocalAiProfile = {
   simulations: number;
@@ -98,6 +131,37 @@ export const LOCAL_AI_PROFILE: LocalAiProfile = {
   raiseThresholdBias: -0.025,
   callThresholdBias: 0.012,
 };
+
+export function getLocalAiProfile(maxReasoning = true): LocalAiProfile {
+  if (maxReasoning) {
+    return {
+      ...LOCAL_AI_PROFILE,
+      simulations: 960,
+      equityWeight: 0.95,
+      noiseScale: 0.008,
+      rangeInference: 1.08,
+    };
+  }
+  return {
+    ...LOCAL_AI_PROFILE,
+    simulations: 260,
+    equityWeight: 0.86,
+    noiseScale: 0.028,
+    rangeInference: 0.96,
+  };
+}
+
+/**
+ * Monte-Carlo budget for one decision. Every simulation evaluates the hero plus each
+ * live rival, so raw cost grows with the table; dividing the budget by the rival count
+ * keeps a decision inside a similar time slice at any table size. Accuracy holds up
+ * because multiway equity is lower, which shrinks each sample's variance: ±1.6% for
+ * 960 samples heads-up against ±1.9% for 384 samples with five rivals.
+ */
+export function simulationBudget(base: number, rivals: number): number {
+  if (rivals <= 2) return base;
+  return Math.max(Math.min(base, 160), Math.round(base * 2 / rivals));
+}
 
 function makeDeck(): Card[] {
   return SUITS.flatMap((suit) => RANKS.map((rank) => ({ suit, rank, id: `${rank}${suit}` })));
@@ -124,6 +188,20 @@ function shuffle<T>(items: T[]): T[] {
   return result;
 }
 
+/**
+ * Fisher-Yates for the AI's private Monte-Carlo rollouts. Real deals use the crypto-backed
+ * shuffle above; a rollout only needs statistical randomness, and at hundreds of rollouts per
+ * decision the crypto calls cost more than the hand evaluation they feed.
+ */
+function sampleShuffle<T>(items: T[]): T[] {
+  const result = [...items];
+  for (let i = result.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+
 function nextSeat(players: Player[], from: number, predicate: (player: Player) => boolean): number {
   for (let offset = 1; offset <= players.length; offset += 1) {
     const index = (from + offset) % players.length;
@@ -139,16 +217,44 @@ function addLog(state: GameState, text: string, tone: LogEntry["tone"] = "muted"
   };
 }
 
+export type SeatProfile = { id: string; name: string; avatar: string; note: string; aggression: number };
+
+/**
+ * Table order for AI seats. Every id matches one configured opponent skill package,
+ * so an all-AI table never has to borrow another seat's skill. Seat 0 is the bottom
+ * seat: `iris` on a spectator table, the human seat in local play.
+ */
+export const AI_SEAT_PROFILES: SeatProfile[] = [
+  { id: "iris", name: "Iris", avatar: "I", note: "均衡 · 频率", aggression: 0.55 },
+  { id: "mira", name: "Mira", avatar: "M", note: "沉稳 · 紧手", aggression: 0.35 },
+  { id: "knox", name: "Knox", avatar: "K", note: "敏锐 · 均衡", aggression: 0.58 },
+  { id: "aria", name: "Aria", avatar: "A", note: "大胆 · 激进", aggression: 0.78 },
+  { id: "theo", name: "Theo", avatar: "T", note: "理性 · 观察", aggression: 0.48 },
+  { id: "nova", name: "Nova", avatar: "N", note: "灵活 · 难测", aggression: 0.67 },
+];
+
+const HUMAN_SEAT_PROFILE: SeatProfile = { id: "you", name: "你", avatar: "你", note: "你的座位", aggression: 0.5 };
+
+function seatCount(playerCount: number): number {
+  return Math.max(2, Math.min(6, Math.round(playerCount)));
+}
+
+/** Seats used by the all-AI spectator table, in table order. */
+export function spectatorSeatProfiles(playerCount = 4): SeatProfile[] {
+  return AI_SEAT_PROFILES.slice(0, seatCount(playerCount));
+}
+
+function seatToPlayer(profile: SeatProfile, isHuman: boolean, aiProvider?: string): Player {
+  return {
+    id: profile.id, name: profile.name, chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false,
+    isHuman, ...(isHuman ? {} : { aiProvider: aiProvider || "local" }),
+    avatar: profile.avatar, note: profile.note, aggression: profile.aggression, lastAction: "",
+  };
+}
+
 function basePlayers(playerCount = 4): Player[] {
-  const players: Player[] = [
-    { id: "you", name: "你", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: true, avatar: "你", note: "你的座位", aggression: 0.5, lastAction: "" },
-    { id: "mira", name: "Mira", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "M", note: "沉稳 · 紧手", aggression: 0.35, lastAction: "" },
-    { id: "knox", name: "Knox", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "K", note: "敏锐 · 均衡", aggression: 0.58, lastAction: "" },
-    { id: "aria", name: "Aria", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "A", note: "大胆 · 激进", aggression: 0.78, lastAction: "" },
-    { id: "theo", name: "Theo", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "T", note: "理性 · 观察", aggression: 0.48, lastAction: "" },
-    { id: "nova", name: "Nova", chips: 2000, hole: [], bet: 0, totalBet: 0, folded: false, allIn: false, isHuman: false, avatar: "N", note: "灵活 · 难测", aggression: 0.67, lastAction: "" },
-  ];
-  return players.slice(0, Math.max(2, Math.min(6, Math.round(playerCount))));
+  const seats = [HUMAN_SEAT_PROFILE, ...AI_SEAT_PROFILES.slice(1)].slice(0, seatCount(playerCount));
+  return seats.map((profile, index) => seatToPlayer(profile, index === 0));
 }
 
 export function newSession(playerCount = 4): GameState {
@@ -157,9 +263,19 @@ export function newSession(playerCount = 4): GameState {
     tableMode: "local", players, deck: [], community: [], phase: "preflop", status: "handOver",
     dealer: secureRandomIndex(players.length), currentPlayer: -1, currentBet: 0, minRaise: 20,
     acted: [], actedAt: {}, handNo: 0, smallBlind: 10, bigBlind: 20, blindLevel: 1, winners: [], message: "",
-    log: [], lastPot: 0,
+    log: [], lastPot: 0, decisionTiming: {}, revealedHands: [],
   };
   return startNextHand(initial, true);
+}
+
+export function newSpectatorSession(playerCount = 4, aiProviders: Record<string, string> = {}): GameState {
+  const players = spectatorSeatProfiles(playerCount).map((profile) => seatToPlayer(profile, false, aiProviders[profile.id]));
+  return startNextHand({
+    tableMode: "spectator", players, deck: [], community: [], phase: "preflop", status: "handOver",
+    dealer: secureRandomIndex(players.length), currentPlayer: -1, currentBet: 0, minRaise: 20,
+    acted: [], actedAt: {}, handNo: 0, smallBlind: 10, bigBlind: 20, blindLevel: 1,
+    winners: [], message: "准备观战", log: [], lastPot: 0, decisionTiming: {}, revealedHands: [],
+  }, true);
 }
 
 export type OnlinePlayerSeed = { id: string; name: string; avatar: string };
@@ -175,6 +291,7 @@ export function newOnlineSession(seats: OnlinePlayerSeed[]): GameState {
     folded: false,
     allIn: false,
     isHuman: false,
+    aiProvider: "local",
     avatar: seat.avatar,
     note: "在线玩家",
     aggression: 0.5,
@@ -185,7 +302,7 @@ export function newOnlineSession(seats: OnlinePlayerSeed[]): GameState {
     tableMode: "online", players, deck: [], community: [], phase: "preflop", status: "handOver",
     dealer: secureRandomIndex(players.length), currentPlayer: -1, currentBet: 0, minRaise: 20,
     acted: [], actedAt: {}, handNo: 0, smallBlind: 10, bigBlind: 20, blindLevel: 1,
-    winners: [], message: "", log: [], lastPot: 0,
+    winners: [], message: "", log: [], lastPot: 0, decisionTiming: {}, revealedHands: [],
   }, true);
 }
 
@@ -217,10 +334,12 @@ export function startNextHand(previous: GameState, first = false): GameState {
   const funded = previous.players.filter((player) => player.chips > 0);
   const human = previous.players.find((player) => player.isHuman);
   const onlineFinished = previous.tableMode === "online" && funded.length < 2;
-  const localFinished = previous.tableMode !== "online" && (!human || human.chips <= 0 || funded.length < 2);
-  if (onlineFinished || localFinished) {
+  const spectatorFinished = previous.tableMode === "spectator" && funded.length < 2;
+  const localFinished = previous.tableMode !== "online" && previous.tableMode !== "spectator" && (!human || human.chips <= 0 || funded.length < 2);
+  if (onlineFinished || spectatorFinished || localFinished) {
     const champion = funded[0];
-    return { ...previous, status: "gameOver", currentPlayer: -1, message: previous.tableMode === "online" && champion ? `${champion.name} 赢下了整场对局` : human?.chips ? "你赢下了整场对局" : "本场对局结束" };
+    const isAiTable = previous.tableMode === "online" || previous.tableMode === "spectator";
+    return { ...previous, status: "gameOver", currentPlayer: -1, message: isAiTable && champion ? `${champion.name} 赢下了整场对局` : human?.chips ? "你赢下了整场对局" : "本场对局结束" };
   }
 
   const deck = shuffle(makeDeck());
@@ -240,11 +359,16 @@ export function startNextHand(previous: GameState, first = false): GameState {
   players = postBlind(players, smallIndex, smallBlind, "小盲");
   players = postBlind(players, bigIndex, bigBlind, "大盲");
   const currentPlayer = nextSeat(players, bigIndex, (player) => !player.folded && !player.allIn && player.chips > 0);
+  // Keep session totals, clear the per-hand clock.
+  const decisionTiming = Object.fromEntries(
+    Object.entries(previous.decisionTiming || {}).map(([id, timing]) => [id, { ...timing, hand: [] }]),
+  );
   const state: GameState = {
     ...previous, players, deck, community: [], phase: "preflop", status: "playing", dealer,
     currentPlayer, currentBet: bigBlind, minRaise: bigBlind,
     smallBlind, bigBlind, blindLevel,
-    acted: [], actedAt: {}, handNo, winners: [], message: "新一手牌", lastPot: 0,
+    acted: [], actedAt: {}, handNo, winners: [], message: "新一手牌", lastPot: 0, decisionTiming,
+    revealedHands: previous.revealedHands || [],
     log: [{ id: Date.now(), text: `第 ${handNo} 手牌 · 盲注 ${smallBlind} / ${bigBlind}`, tone: "strong" }],
   };
   return currentPlayer === -1 ? runToShowdown(state) : state;
@@ -273,9 +397,13 @@ function awardUncontested(state: GameState, winner: Player): GameState {
   const uncalled = Math.max(0, winner.totalBet - matchedByOpponent);
   const pot = committed - uncalled;
   const players = state.players.map((player) => player.id === winner.id ? { ...player, chips: player.chips + committed, lastAction: `赢得 ${pot}` } : player);
+  // Tournament practice: a pot won because everyone folded is taken without showing.
+  const revealedHands = pushRevealedHand(state, {
+    handNo: state.handNo, reachedShowdown: false, board: state.community.map(cardCode), pot, reveals: [],
+  });
   return addLog({
     ...state, players, status: "handOver", currentPlayer: -1, winners: [{ ids: [winner.id], amount: pot, label: "其余玩家弃牌" }],
-    message: `${winner.name} 收下 ${pot}`, lastPot: pot,
+    message: `${winner.name} 收下 ${pot}`, lastPot: pot, revealedHands,
   }, `${winner.name} 收下底池 ${pot}${uncalled ? `，退回未被跟注 ${uncalled}` : ""}`, "strong");
 }
 
@@ -332,7 +460,32 @@ export function canPlayerRaise(state: GameState, player: Player): boolean {
   return lastActedAt === undefined || state.currentBet - lastActedAt >= state.minRaise;
 }
 
-export function applyAction(state: GameState, playerId: string, action: GameAction): GameState {
+/** Keep the reveal history short: it is fed to the models as recent public information. */
+const REVEAL_HISTORY_LIMIT = 6;
+
+function round1(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function recordDecisionTime(state: GameState, playerId: string, seconds?: number): Record<string, DecisionTiming> | undefined {
+  if (seconds === undefined || !Number.isFinite(seconds)) return state.decisionTiming;
+  const value = Math.max(0, round1(seconds));
+  const timing = { ...(state.decisionTiming || {}) };
+  const previous = timing[playerId] || { last: 0, hand: [], total: 0, samples: 0 };
+  timing[playerId] = {
+    last: value,
+    hand: [...previous.hand, value],
+    total: round1(previous.total + value),
+    samples: previous.samples + 1,
+  };
+  return timing;
+}
+
+function pushRevealedHand(state: GameState, entry: RevealedHand): RevealedHand[] {
+  return [entry, ...(state.revealedHands || [])].slice(0, REVEAL_HISTORY_LIMIT);
+}
+
+export function applyAction(state: GameState, playerId: string, action: GameAction, decisionSeconds?: number): GameState {
   if (state.status !== "playing") return state;
   const actorIndex = state.players.findIndex((player) => player.id === playerId);
   if (actorIndex !== state.currentPlayer || actorIndex < 0) return state;
@@ -398,11 +551,17 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
         : previousBet > actor.bet ? `${actor.name} 跟注 ${paid}` : `${actor.name} 过牌`;
   }
 
-  const next = addLog({ ...state, players, acted, actedAt, currentBet, minRaise, message: text }, text);
+  const decisionTiming = recordDecisionTime(state, actor.id, decisionSeconds);
+  const elapsed = decisionTiming?.[actor.id]?.last;
+  const logText = decisionSeconds === undefined || elapsed === undefined ? text : `${text} · 用时 ${elapsed} 秒`;
+  const next = addLog({ ...state, players, acted, actedAt, currentBet, minRaise, decisionTiming, message: text }, logText);
   return progressAfterAction(next, actorIndex);
 }
 
-interface EvaluatedHand { score: number[]; label: string; }
+interface HandScore { score: number[]; label: string; }
+
+/** A scored hand plus the exact five cards that make it, so reviews can show the composition. */
+export interface EvaluatedHand extends HandScore { cards: Card[]; }
 
 function compareScore(a: number[], b: number[]): number {
   for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
@@ -411,7 +570,7 @@ function compareScore(a: number[], b: number[]): number {
   return 0;
 }
 
-function evaluateFive(cards: Card[]): EvaluatedHand {
+function evaluateFive(cards: Card[]): HandScore {
   const ranks = cards.map((card) => card.rank).sort((a, b) => b - a);
   const counts = new Map<number, number>();
   ranks.forEach((rank) => counts.set(rank, (counts.get(rank) || 0) + 1));
@@ -442,15 +601,16 @@ function evaluateFive(cards: Card[]): EvaluatedHand {
 }
 
 export function evaluateBest(cards: Card[]): EvaluatedHand {
-  if (cards.length < 5) return { score: [-1], label: preflopLabel(cards) };
-  let best: EvaluatedHand = { score: [-1], label: "" };
+  if (cards.length < 5) return { score: [-1], label: preflopLabel(cards), cards: [...cards] };
+  let best: EvaluatedHand = { score: [-1], label: "", cards: [] };
   for (let a = 0; a < cards.length - 4; a += 1)
     for (let b = a + 1; b < cards.length - 3; b += 1)
       for (let c = b + 1; c < cards.length - 2; c += 1)
         for (let d = c + 1; d < cards.length - 1; d += 1)
           for (let e = d + 1; e < cards.length; e += 1) {
-            const hand = evaluateFive([cards[a], cards[b], cards[c], cards[d], cards[e]]);
-            if (compareScore(hand.score, best.score) > 0) best = hand;
+            const five = [cards[a], cards[b], cards[c], cards[d], cards[e]];
+            const hand = evaluateFive(five);
+            if (compareScore(hand.score, best.score) > 0) best = { ...hand, cards: five };
           }
   return best;
 }
@@ -511,9 +671,29 @@ function showdown(state: GameState): GameState {
   const names = main?.ids.map((id) => players.find((player) => player.id === id)?.name).join("、") || "";
   const message = `${names} · ${main?.label || "胜出"}`;
   const pot = committed - uncalled;
+  // TDA rules 15–17: every player still contesting the pot tables their hand; folded
+  // hands are mucked. That set is exactly the public information after the hand.
+  const contenders = state.players.filter((player) => !player.folded && player.hole.length > 0);
+  // Winning a pot, not getting an uncalled bet returned: `awards` holds both, `winnerGroups` only the former.
+  const potWinners = new Set(winnerGroups.flatMap((group) => group.ids));
+  const revealedHands = pushRevealedHand(state, {
+    handNo: state.handNo,
+    reachedShowdown: contenders.length > 1,
+    board: state.community.map(cardCode),
+    pot,
+    reveals: contenders.length > 1
+      ? contenders.map((player) => ({
+        id: player.id,
+        name: player.name,
+        hole: player.hole.map(cardCode),
+        label: evaluateBest([...player.hole, ...state.community]).label,
+        won: potWinners.has(player.id),
+      }))
+      : [],
+  });
   return addLog({
     ...state, players, phase: "showdown", status: "handOver", currentPlayer: -1,
-    winners: winnerGroups, message, lastPot: pot,
+    winners: winnerGroups, message, lastPot: pot, revealedHands,
   }, `${message}，底池 ${pot}${uncalled ? `，退回未被跟注 ${uncalled}` : ""}`, "strong");
 }
 
@@ -537,13 +717,13 @@ function handStrength(player: Player, community: Card[]): number {
   return Math.min(1, 0.12 + category * 0.115 + (result.score[1] || 0) / 100);
 }
 
-function inferredRangeFloor(player: Player): number {
+function inferredRangeFloor(player: Player, rangeInference = LOCAL_AI_PROFILE.rangeInference): number {
   const action = player.lastAction || "";
   const floor = action.includes("全下") ? 0.52
     : action.includes("加注") ? 0.43
       : action.includes("下注") ? 0.34
         : action.includes("跟注") ? 0.2 : 0;
-  return floor * LOCAL_AI_PROFILE.rangeInference;
+  return floor * rangeInference;
 }
 
 function drawRangedHole(pool: Card[], floor: number): { hole: Card[]; remaining: Card[] } {
@@ -563,7 +743,7 @@ function drawRangedHole(pool: Card[], floor: number): { hole: Card[]; remaining:
   return { hole, remaining: pool.filter((_, index) => !removed.has(index)) };
 }
 
-export function estimateEquity(state: GameState, player: Player, simulations = 120): number {
+export function estimateEquity(state: GameState, player: Player, simulations = 120, rangeInference = LOCAL_AI_PROFILE.rangeInference): number {
   const opponents = state.players.filter((candidate) => candidate.id !== player.id && !candidate.folded && candidate.hole.length > 0);
   if (!opponents.length) return 1;
   const knownIds = new Set([...player.hole, ...state.community].map((card) => card.id));
@@ -572,10 +752,10 @@ export function estimateEquity(state: GameState, player: Player, simulations = 1
   let points = 0;
 
   for (let simulation = 0; simulation < simulations; simulation += 1) {
-    let pool = shuffle(unknownDeck);
+    let pool = sampleShuffle(unknownDeck);
     const opponentHands: Card[][] = [];
     for (const opponent of opponents) {
-      const draw = drawRangedHole(pool, inferredRangeFloor(opponent));
+      const draw = drawRangedHole(pool, inferredRangeFloor(opponent, rangeInference));
       opponentHands.push(draw.hole);
       pool = draw.remaining;
     }
@@ -597,11 +777,12 @@ function positionAdjustment(state: GameState, player: Player): number {
   return index === firstToAct ? -0.025 : 0;
 }
 
-export function chooseAiAction(state: GameState, player: Player): GameAction {
+export function chooseAiAction(state: GameState, player: Player, options: { maxReasoning?: boolean } = {}): GameAction {
   const due = Math.max(0, state.currentBet - player.bet);
   const pot = Math.max(state.bigBlind, getPot(state));
-  const profile = LOCAL_AI_PROFILE;
-  const equity = estimateEquity(state, player, profile.simulations);
+  const profile = getLocalAiProfile(options.maxReasoning !== false);
+  const rivals = state.players.filter((candidate) => candidate.id !== player.id && !candidate.folded && candidate.hole.length > 0).length;
+  const equity = estimateEquity(state, player, simulationBudget(profile.simulations, rivals), profile.rangeInference);
   const made = handStrength(player, state.community);
   const noise = (Math.random() - 0.5) * profile.noiseScale;
   const strength = Math.max(0, Math.min(1, equity * profile.equityWeight + made * (1 - profile.equityWeight) + positionAdjustment(state, player) + noise));

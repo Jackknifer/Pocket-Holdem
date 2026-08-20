@@ -270,7 +270,7 @@ test("MiniMax falls back between its official global and mainland China regions"
 });
 
 test("ships the complete game instead of starter preview assets", async () => {
-  const [page, engine, css, packageJson, aiRoute, aiSkillsEntry, modelConfig, viteConfig, onlineClient, onlineRoom, workerEntry] = await Promise.all([
+  const [page, engine, css, packageJson, aiRoute, aiSkillsEntry, modelConfig, viteConfig, onlineClient, onlineRoom, workerEntry, modelPoker] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/game.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
@@ -282,8 +282,9 @@ test("ships the complete game instead of starter preview assets", async () => {
     readFile(new URL("../app/online-game.tsx", import.meta.url), "utf8"),
     readFile(new URL("../worker/online-room.ts", import.meta.url), "utf8"),
     readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/model-poker.ts", import.meta.url), "utf8"),
   ]);
-  const opponentSkillNames = ["mira", "knox", "aria", "theo", "nova"];
+  const opponentSkillNames = ["iris", "mira", "knox", "aria", "theo", "nova"];
   const opponentSkillSources = await Promise.all(opponentSkillNames.map((name) => readFile(new URL(`../app/opponent-skills/${name}.ts`, import.meta.url), "utf8")));
   const aiSkills = [aiSkillsEntry, ...opponentSkillSources].join("\n");
   assert.match(page, /chooseAiAction/);
@@ -334,10 +335,37 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(page, /查看模型实际输出/);
   assert.match(page, /模型请求凭证/);
   assert.match(page, /requestId/);
-  assert.match(page, /本手底牌复盘/);
-  assert.match(page, /训练复盘/);
-  assert.match(page, /标准亮牌/);
+  assert.match(page, /本手公共牌与底牌复盘/);
+  assert.match(page, /国际赛制/);
+  assert.match(page, /全部底牌/);
   assert.match(page, /reviewMode/);
+  assert.match(page, /review-board/);
+  assert.match(page, /review-best-five/);
+  assert.match(page, /AI 观战/);
+  assert.match(page, /newSpectatorSession/);
+  assert.match(page, /spectatorSeatProfiles/);
+  assert.match(page, /暂停观战/);
+  assert.match(page, /spectatorReveal/);
+  assert.match(page, /spectator-dock/);
+  assert.match(page, /spectatorProviders/);
+  assert.match(page, /peekedSeats/);
+  // The top-right pause button is gone; only the dock keeps it.
+  assert.doesNotMatch(page, /spectator-pause-button/);
+  assert.doesNotMatch(page, /spectator-peek-hint|点击任意座位的暗牌/);
+  // A spectator click opens a seat and a second click closes it again.
+  assert.match(page, /revealed !== peeked/);
+  assert.match(page, /current\.includes\(player\.id\) \? current\.filter/);
+  // The spectator seats run the same connection test as the local model card.
+  assert.match(page, /function probeModel/);
+  assert.match(page, /providerTests/);
+  assert.match(page, /onTestProvider/);
+  assert.match(page, /spectator-retest/);
+  assert.match(page, /spectator-seat-dot/);
+  assert.match(page, /检测连接/);
+  assert.match(page, /待检测/);
+  // All three model pickers share the popover list instead of a native select.
+  assert.match(page, /ModelChoiceOptions/);
+  assert.doesNotMatch(page, /<select/);
   assert.match(page, /声音已开启，点击关闭/);
   assert.match(page, /已回退本地 AI/);
   assert.match(page, /safeModelError/);
@@ -370,6 +398,18 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(engine, /actedAt/);
   assert.match(engine, /退回未被跟注/);
   assert.match(engine, /正式牌局每条公共牌街先烧一张牌/);
+  assert.match(engine, /AI_SEAT_PROFILES/);
+  assert.match(engine, /spectatorSeatProfiles/);
+  assert.match(engine, /newSpectatorSession/);
+  assert.match(engine, /decisionTiming/);
+  assert.match(engine, /revealedHands/);
+  assert.match(engine, /TDA rules 15–17/);
+  assert.match(engine, /simulationBudget\(profile\.simulations, rivals\)/);
+  assert.match(engine, /sampleShuffle\(unknownDeck\)/);
+  assert.match(modelPoker, /decisionClock/);
+  assert.match(modelPoker, /revealedHistory/);
+  assert.match(modelPoker, /publicSignals/);
+  assert.match(modelPoker, /getLocalAiProfile\(deepReasoning\)/);
   assert.match(aiRoute, /messages:/);
   assert.match(aiRoute, /thinking:\s*\{ type:\s*"enabled" \}/);
   assert.match(aiRoute, /reasoning_effort:\s*requestedReasoning === "max" \? "max" : "high"/);
@@ -418,6 +458,7 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(aiSkills, /主动施压手/);
   assert.match(aiSkills, /读牌剥削手/);
   assert.match(aiSkills, /自适应变速手/);
+  assert.match(aiSkills, /频率均衡手/);
   for (const envName of ["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "MINIMAX_API_KEY", "KIMI_API_KEY", "GLM_API_KEY", "POCKET_CUSTOM_MODELS_JSON"]) assert.match(modelConfig, new RegExp(envName));
   assert.match(modelConfig, /deepseek-v4-flash/);
   assert.match(modelConfig, /MiniMax-M2\.7/);
@@ -446,6 +487,19 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(css, /\.audit-output/);
   assert.match(css, /\.hand-review-grid/);
   assert.match(css, /\.review-card-code/);
+  assert.match(css, /\.review-board/);
+  assert.match(css, /\.review-best-five/);
+  assert.match(css, /\.spectator-dock/);
+  assert.match(css, /\.spectator-seat-row/);
+  assert.match(css, /\.spectator-seat-dot\.ready/);
+  assert.match(css, /\.spectator-retest/);
+  assert.match(css, /\.online-model-trigger/);
+  // The spectator card keeps the model card's footprint in the bottom-right cell.
+  assert.doesNotMatch(css, /\.lobby-spectator-card/);
+  assert.doesNotMatch(css, /\.spectator-peek-hint/);
+  assert.doesNotMatch(css, /\.spectator-pause-button/);
+  assert.match(css, /\.opponent-hand-tag/);
+  assert.match(css, /\.opponent-cards\.is-open/);
   assert.match(css, /font-variant-numeric:\s*lining-nums tabular-nums/);
   assert.match(css, /\.result-card\.has-review\s*\{[^}]*min\(760px/i);
   assert.match(css, /\.sound-toggle\.is-on/);
@@ -479,7 +533,9 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(onlineRoom, /modelCallTimestamps/);
   assert.match(onlineRoom, /recentActionIds/);
   assert.match(onlineRoom, /hole:\s*player\.id === viewerId/);
-  assert.match(onlineRoom, /applyAction\(room\.game, member\.id, action\)/);
+  assert.match(onlineRoom, /applyAction\(room\.game, member\.id, action, spent\)/);
+  assert.match(onlineRoom, /buildModelContext\(room\.game, actor, room\.turnTime, bot\.skillId, \{ maxReasoning: room\.maxReasoning \}\)/);
+  assert.match(onlineRoom, /chooseAiAction\(room\.game, actor, \{ maxReasoning: room\.maxReasoning \}\)/);
   assert.match(onlineClient, /pocket-online-session/);
   assert.match(onlineClient, /\/snapshot/);
   assert.match(onlineClient, /\/message/);
@@ -487,6 +543,10 @@ test("ships the complete game instead of starter preview assets", async () => {
   assert.match(onlineClient, /actionId:\s*crypto\.randomUUID/);
   assert.match(onlineClient, /AI 对手/);
   assert.match(onlineClient, /真人与 AI 可同桌/);
+  // The room's AI seats pick their model from the same popover list as the lobby, not a native select.
+  assert.match(onlineClient, /ModelChoiceOptions/);
+  assert.match(onlineClient, /online-model-trigger/);
+  assert.doesNotMatch(onlineClient, /<select/);
   assert.match(css, /\.online-entry/);
   assert.match(css, /\.online-room-card/);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));

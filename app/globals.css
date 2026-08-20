@@ -106,6 +106,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .opponent-cards { position: absolute; left: 50%; bottom: calc(100% + 7px); display: flex; transform: translateX(-50%); z-index: -1; }
 .opponent-cards .playing-card + .playing-card { margin-left: -17px; transform: rotate(4deg); }
 .opponent-cards .playing-card:first-child { transform: rotate(-4deg); }
+.opponent-card-pair { display: flex; padding: 0; border: 0; background: none; }
+button.opponent-card-pair { cursor: pointer; }
+button.opponent-card-pair:hover .playing-card { border-color: var(--ink); }
+/* Only the spectator table stacks a hand label under the cards; online keeps the plain row. */
+.opponent-cards.is-open { z-index: 3; flex-direction: column; align-items: center; gap: 4px; }
+.seat-side-top .opponent-cards.is-open { top: calc(100% + 7px); bottom: auto; }
+.opponent-hand-tag { padding: 2px 6px; border: 1px solid #d2d0c9; border-radius: 7px; background: rgba(255,255,255,.92); color: var(--muted); font: normal 8px/1.3 Arial; white-space: nowrap; }
+.spectator-paused-overlay { position: absolute; z-index: 16; left: 50%; top: 50%; transform: translate(-50%,-50%); padding: 20px 26px; display: grid; justify-items: center; gap: 6px; border: 1px solid var(--line-dark); border-radius: 18px; background: rgba(255,255,253,.94); text-align: center; box-shadow: var(--shadow); backdrop-filter: blur(14px); }
+.spectator-paused-overlay strong { font-size: 15px; }
+.spectator-paused-overlay span { color: var(--muted); font-size: 10px; }
 .playing-card { width: 61px; height: 84px; padding: 8px; display: flex; flex-direction: column; align-items: flex-start; flex: 0 0 auto; overflow: hidden; border: 1px solid #cbc9c2; border-radius: 10px; background: linear-gradient(145deg,#fff,#fafaf7); color: #242421; box-shadow: 0 7px 20px rgba(32,32,29,.095), inset 0 1px 0 #fff; }
 .playing-card b { font-size: 17px; line-height: 1; }
 .playing-card i { margin-top: auto; font: normal 18px/1 Georgia, serif; }
@@ -145,6 +155,13 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .hand-review-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; }
 .hand-review-grid article { min-width: 0; min-height: 66px; padding: 10px; display: flex; align-items: center; gap: 11px; border: 1px solid #e5e4de; border-radius: 11px; background: white; }.hand-review-grid article > span { width: 38px; height: 38px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; background: var(--ink); color: white; font-size: 10px; font-weight: 750; }.hand-review-grid article > div { min-width: 0; }.hand-review-grid article > div > strong,.hand-review-grid article > div > small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.hand-review-grid article > div > strong { font-size: 10px; }.hand-review-grid article > div > small { color: var(--muted); font-size: 9px; font-weight: 400; }.hand-review-grid article.folded { opacity: .58; }.hand-review-grid article.winner { border-color: #9acdbf; box-shadow: inset 4px 0 var(--accent); opacity: 1; }
 .review-hole-cards { height: 22px; margin: 4px 0; display: flex; align-items: center; gap: 10px; }
+.review-board { margin-bottom: 12px; padding: 10px 12px; display: flex; align-items: center; gap: 12px; border: 1px solid #e5e4de; border-radius: 11px; background: white; }
+.review-board > small { flex: 0 0 auto; color: var(--muted); font-size: 9px; letter-spacing: .05em; }
+.review-board-cards { min-height: 22px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.review-board-cards em { color: var(--faint); font: normal 9px/1 Arial; }
+.review-best-five { margin: 0 0 4px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.review-best-five > small { color: var(--faint); font-size: 8px; letter-spacing: .05em; }
+.review-best-five .review-card-code { font-size: 13px; }.review-best-five .review-card-code i { font-size: 11px; }
 .review-card-code { display: inline-flex; align-items: center; gap: 2px; color: var(--ink); font: 750 17px/1 Arial,sans-serif; font-variant-numeric: lining-nums tabular-nums; letter-spacing: 0; }
 .review-card-code b,.review-card-code i { margin: 0; display: block; overflow: visible; font: inherit; font-style: normal; line-height: 1; }
 .review-card-code i { font-size: 15px; }.review-card-code.is-red { color: #b34b43; }
@@ -176,6 +193,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 
 .control-dock { height: 132px; position: fixed; z-index: 25; left: 0; right: 0; bottom: 0; padding: 17px clamp(20px, 4vw, 58px); display: grid; grid-template-columns: minmax(210px,300px) minmax(420px,600px); justify-content: center; align-items: center; gap: clamp(28px,4vw,64px); border-top: 1px solid var(--line); background: rgba(250,250,247,.95); backdrop-filter: blur(24px); box-shadow: 0 -12px 45px rgba(32,32,29,.035); }
 .dock-waiting .action-area { opacity: .52; }
+.spectator-dock { grid-template-columns: minmax(210px,300px) minmax(300px,420px); }
+.spectator-dock.is-paused { border-top-color: var(--line-dark); background: rgba(247,247,243,.97); }
+.spectator-control-row { display: flex; justify-content: flex-end; gap: 9px; }
 .dock-your-turn { border-top-color: var(--ink); background: rgba(255,255,252,.98); box-shadow: 0 -5px 0 rgba(41,41,37,.055), 0 -18px 55px rgba(32,32,29,.08); }
 .dock-your-turn .dock-context small { color: var(--ink); font-weight: 750; }
 .dock-your-turn .dock-context strong { font-size: 14px; }
@@ -275,6 +295,25 @@ kbd { margin-left: 9px; padding: 2px 4px; border: 1px solid currentColor; border
 .lobby-control-card .segment-control button { height: 40px; border-radius: 8px; font-size: 12px; }
 .lobby-control-card > small { min-height: 18px; margin-top: 10px; display: block; overflow: hidden; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .lobby-player-count .segment-control button { font-size: 12px; }
+/* Seat cards stack the name over its current model, so six seats fit the popover without a scroll. */
+.spectator-seat-list { margin-top: 8px; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
+.spectator-seat-list.is-single { grid-template-columns: minmax(0,1fr); }
+.spectator-seat-row { width: 100%; min-width: 0; padding: 7px 9px; display: grid; gap: 6px; border: 1px solid var(--line); border-radius: 10px; background: #fbfbf8; color: var(--ink); cursor: pointer; text-align: left; }
+.spectator-seat-row:hover { border-color: var(--line-dark); background: white; }
+.spectator-seat-row > span { min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; font-size: 10px; font-weight: 650; white-space: nowrap; }
+.spectator-seat-row > span i { width: 19px; height: 19px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 6px; background: var(--ink); color: white; font: normal 8px/1 Arial; }
+.spectator-seat-value { min-width: 0; min-height: 27px; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; gap: 6px; overflow: hidden; border: 1px solid var(--line-dark); border-radius: 8px; background: white; color: var(--muted); font-size: 10px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.spectator-seat-value::after { content: "›"; flex: 0 0 auto; color: var(--ink); font-size: 12px; }
+.spectator-seat-value > span { min-width: 0; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* One dot per seat carries its connection test: grey means local, amber testing, green connected, red failed. */
+.spectator-seat-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--faint); }
+.spectator-seat-dot.local { background: #d8d7d0; }
+.spectator-seat-dot.working { background: #a68a31; }
+.spectator-seat-dot.ready { background: var(--accent); }
+.spectator-seat-dot.fallback { background: var(--danger); }
+.spectator-seat-row:hover .spectator-seat-value { border-color: var(--ink); color: var(--ink); }
+.spectator-seat-list.is-single .spectator-seat-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.spectator-seat-list.is-single .spectator-seat-value { max-width: 210px; flex: 0 0 auto; }
 .lobby-model-picker { min-width: 0; position: relative; z-index: 1; }
 .lobby-model-picker.is-open { z-index: 12; }
 .lobby-model-card { min-height: 136px; display: grid; grid-template-rows: minmax(0,1fr) 40px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: white; transition: transform .18s ease,border-color .18s ease,box-shadow .18s ease; }
@@ -299,6 +338,16 @@ kbd { margin-left: 9px; padding: 2px 4px; border: 1px solid currentColor; border
 .lobby-model-popover > button > span:nth-child(2) { min-width: 0; }.lobby-model-popover > button b,.lobby-model-popover > button small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.lobby-model-popover > button b { font-size: 10px; }.lobby-model-popover > button small { margin-top: 3px; color: var(--muted); font-size: 8px; font-weight: 400; }.lobby-model-popover > button i { visibility: hidden; color: var(--ink); font-size: 10px; font-style: normal; }.lobby-model-popover > button.selected i { visibility: visible; }
 .lobby-model-popover > p { margin: 5px 7px 7px; color: var(--muted); font-size: 8px; line-height: 1.45; }
 .lobby-model-popover > .lobby-model-popover-status { margin-top: 7px; padding: 7px 8px; border-radius: 7px; background: var(--paper); }.lobby-model-popover-status.ready { color: #25745e; }.lobby-model-popover-status.working { color: #76682e; }.lobby-model-popover-status.fallback { color: var(--danger); }
+/* Same popover shell as the model picker, sized for the seat grid it holds. */
+.spectator-popover { width: min(344px,calc(100vw - 28px)); max-height: min(352px,62vh); }
+.spectator-popover .lobby-model-popover-head { min-height: 27px; }
+.spectator-popover .lobby-model-popover-head strong { margin-right: auto; }
+.spectator-mode-switch { grid-template-columns: repeat(2,1fr); }
+.spectator-popover-back { width: 22px; height: 22px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--ink); cursor: pointer; font-size: 11px; }
+.spectator-popover-back:hover { border-color: var(--ink); }
+.spectator-retest { height: 22px; padding: 0 9px; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--muted); cursor: pointer; font-size: 8px; }
+.spectator-retest:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
+.spectator-retest:disabled { color: var(--faint); cursor: default; }
 .lobby-footer { width: min(760px,100%); display: grid; grid-template-columns: minmax(0,1fr) 232px; align-items: center; gap: 17px; }
 .lobby-outside-meta { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
 .lobby-selection-line,.lobby-history { min-height: 25px; display: flex; align-items: center; gap: 9px; overflow: hidden; color: var(--muted); font-size: 12px; white-space: nowrap; }
@@ -321,7 +370,12 @@ kbd { margin-left: 9px; padding: 2px 4px; border: 1px solid currentColor; border
 .online-field { display: block; }.online-field span { display: block; margin-bottom: 8px; color: var(--muted); font-size: 10px; }.online-field input,.online-join-row input { width: 100%; height: 48px; padding: 0 14px; border: 1px solid var(--line); border-radius: 11px; outline: 0; background: var(--paper); color: var(--ink); font: inherit; font-size: 13px; }.online-field input:focus,.online-join-row input:focus { border-color: #999890; box-shadow: 0 0 0 3px rgba(41,41,37,.07); }
 .online-ai-setup { margin-top: 14px; padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: var(--paper); }.online-ai-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }.online-ai-heading strong,.online-ai-heading small { display: block; }.online-ai-heading strong { font-size: 11px; }.online-ai-heading small { margin-top: 3px; color: var(--muted); font-size: 8px; }.online-ai-heading > b { color: var(--accent); font-size: 10px; }
 .online-ai-count { margin-top: 10px; padding: 3px; display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 3px; border: 1px solid var(--line); border-radius: 10px; background: white; }.online-ai-count button { height: 30px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }.online-ai-count button.selected { background: var(--ink); color: white; box-shadow: 0 3px 9px rgba(32,32,29,.13); }
-.online-model-select { margin-top: 11px; display: grid; grid-template-columns: 72px minmax(0,1fr); align-items: center; gap: 5px 9px; }.online-model-select > span { color: var(--muted); font-size: 9px; }.online-model-select select { min-width: 0; height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line); border-radius: 9px; outline: 0; background: white; color: var(--ink); font: inherit; font-size: 9px; }.online-model-select > small { grid-column: 2; color: var(--faint); font-size: 8px; line-height: 1.4; }
+.online-model-select { margin-top: 11px; position: relative; display: grid; grid-template-columns: 72px minmax(0,1fr); align-items: center; gap: 5px 9px; }.online-model-select.is-open { z-index: 12; }.online-model-select > span { color: var(--muted); font-size: 9px; }.online-model-select > small { grid-column: 2; color: var(--faint); font-size: 8px; line-height: 1.4; }
+.online-model-trigger { min-width: 0; height: 34px; padding: 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); cursor: pointer; }
+.online-model-trigger:hover { border-color: var(--line-dark); }
+.online-model-trigger b { min-width: 0; overflow: hidden; font-size: 9px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.online-model-trigger i { flex: 0 0 auto; color: var(--muted); font-size: 10px; font-style: normal; }
+.online-model-popover { width: min(300px,100%); max-height: 232px; right: 0; bottom: auto; top: calc(100% + 6px); }
 .online-room-actions { margin-top: 16px; display: grid; gap: 10px; }.online-room-actions > .primary-button { height: 50px; font-size: 13px; }.online-join-row { display: grid; grid-template-columns: minmax(0,1fr) 86px; gap: 8px; }.online-join-row input { text-transform: uppercase; letter-spacing: .15em; }.online-join-row button { border: 1px solid var(--line-dark); border-radius: 11px; background: white; color: var(--ink); cursor: pointer; font-size: 12px; }.online-join-row button:hover { background: var(--paper); }
 .online-error { margin: 12px 0 0; color: var(--danger); font-size: 10px; line-height: 1.5; }.online-entry-note { display: block; margin-top: 18px; color: var(--faint); font-size: 9px; line-height: 1.5; }
 .online-room-wrap { min-height: calc(100dvh - 64px); padding: 24px; display: grid; place-items: center; }
@@ -418,6 +472,13 @@ kbd { margin-left: 9px; padding: 2px 4px; border: 1px solid currentColor; border
   .seat-copy { min-width: 39px; }.seat-copy strong { font-size: 9px; }.seat-copy small { max-width: 44px; font-size: 7px; }
   .seat-stack { min-width: 38px; padding-left: 5px; }.seat-stack small { font-size: 6px; }.seat-stack b { font-size: 8px; }
   .opponent-cards { display: none; }
+  /* Spectator reveal and the showdown are the only reasons to spend table space on opponent cards here. */
+  .opponent-cards.is-open { display: flex; }
+  .opponent-cards.is-open .playing-card { width: 34px; height: 48px; padding: 4px; border-radius: 6px; }
+  .opponent-cards.is-open .playing-card b { font-size: 10px; }
+  .opponent-cards.is-open .playing-card i { font-size: 11px; }
+  .opponent-cards.is-open .playing-card + .playing-card { margin-left: -10px; }
+  .opponent-hand-tag { padding: 1px 5px; font-size: 7px; }
   .bet-tag { min-width: 64px; min-height: 36px; padding: 5px 8px 5px 11px; border-radius: 10px; }.bet-tag small { font-size: 6px; }.bet-tag strong { font-size: 10px; }
   .seat-side-left .bet-tag { left: 6px; top: calc(100% + 5px); }.seat-side-right .bet-tag { right: 6px; top: calc(100% + 5px); }
   .seat-side-top .bet-tag { top: calc(100% + 7px); }.seat-side-bottom .bet-tag { left: 50%; top: auto; bottom: calc(100% + 5px); transform: translateX(-50%); }
@@ -447,6 +508,9 @@ kbd { margin-left: 9px; padding: 2px 4px; border: 1px solid currentColor; border
   .lobby-section-head { min-height: 28px; }.lobby-section-head > span > small { display: none; }.lobby-section-head strong { font-size: 13px; }.lobby-section-head em { padding: 5px 7px; font-size: 9px; }
   .saved-session-card { min-height: 43px; padding-top: 5px; padding-bottom: 5px; }
   .lobby-controls-grid { grid-template-columns: 1fr; gap: 6px; }
+  .spectator-seat-list { gap: 5px; }
+  .spectator-seat-row { padding: 6px 7px; gap: 5px; }.spectator-seat-value { min-height: 25px; font-size: 9px; }
+  .spectator-popover { width: calc(100% - 10px); max-height: 240px; right: 5px; bottom: 0; }
   .lobby-control-card { min-height: 54px; padding: 8px 9px; display: grid; grid-template-columns: 88px minmax(0,1fr); align-items: center; gap: 9px; }
   .lobby-control-card .setting-label { margin: 0; font-size: 11px; }
   .lobby-control-card .segment-control button { height: 32px; font-size: 10px; }.lobby-player-count .segment-control button { font-size: 9px; }
@@ -470,6 +534,11 @@ kbd { margin-left: 9px; padding: 2px 4px; border: 1px solid currentColor; border
   .round-meta { display: none; }
   .workspace { min-height: calc(100dvh - 146px); padding: 7px 10px; grid-template-columns: minmax(0,1fr); }
   .session-rail,.opponent-cards { display: none; }
+  .opponent-cards.is-open { display: flex; }
+  .opponent-cards.is-open .playing-card { width: 32px; height: 45px; padding: 4px; border-radius: 6px; }
+  .opponent-cards.is-open .playing-card b { font-size: 10px; }
+  .opponent-cards.is-open .playing-card i { font-size: 11px; }
+  .opponent-cards.is-open .playing-card + .playing-card { margin-left: -10px; }
   .table-stage { height: calc(100dvh - 160px); min-height: 280px; max-height: none; border-radius: 24px; }
   .seat { min-width: 136px; }.seat-profile { min-height: 43px; padding: 5px; }.seat-avatar { width: 29px; height: 29px; }.seat-copy small { margin-top: 2px; }
   .seat-you { left: calc(50% + 92px); bottom: 8px; }.hero-hand { left: calc(50% - 100px); bottom: 8px; }.playing-card { width: 44px; height: 61px; }
